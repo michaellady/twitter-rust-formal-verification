@@ -76,20 +76,26 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p "$HOME/.verus"
-          # Verus does not yet ship a stable Linux prebuilt under a predictable
-          # URL. Allow this step to succeed even if the artifact isn't found —
-          # the verify job is continue-on-error: true through Tier 1+2.
-          curl -fsSL -o /tmp/verus.zip \
-            "https://github.com/verus-lang/verus/releases/download/${VERUS_VERSION}/verus-x86_64-unknown-linux-gnu.zip" \
-            || (echo "Verus release not found at expected URL — leaving unpopulated" && exit 0)
+          asset_version="${VERUS_VERSION##*/}"
+          encoded_tag="${VERUS_VERSION//\//%2F}"
+          asset="verus-${asset_version}-x86-linux.zip"
+          url="https://github.com/verus-lang/verus/releases/download/${encoded_tag}/${asset}"
+          if ! curl -fsSL -o /tmp/verus.zip "$url"; then
+            echo "Verus release not found at $url — leaving unpopulated"
+            rm -rf "$HOME/.verus"
+            exit 0
+          fi
           unzip -q /tmp/verus.zip -d "$HOME/.verus"
 
       - name: Add Verus to PATH
         if: steps.detect.outputs.skip == 'false'
         shell: bash
         run: |
-          if [ -d "$HOME/.verus" ]; then
-            echo "$HOME/.verus" >> "$GITHUB_PATH"
+          verus_bin=$(find "$HOME/.verus" -type f -name verus -perm -111 -print -quit 2>/dev/null || true)
+          if [ -n "$verus_bin" ]; then
+            dirname "$verus_bin" >> "$GITHUB_PATH"
+          else
+            echo "verus binary not found under $HOME/.verus"
           fi
 
       - name: Run Verus on each verified crate
@@ -158,10 +164,10 @@ jobs:
             echo "skip=true"  >> "$GITHUB_OUTPUT"
           fi
 
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "tlc_cfg=specs/twitter-pr.cfg" >> "$GITHUB_OUTPUT"
-          else
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
             echo "tlc_cfg=specs/twitter.cfg"    >> "$GITHUB_OUTPUT"
+          else
+            echo "tlc_cfg=specs/twitter-pr.cfg" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: actions/setup-java@v4
