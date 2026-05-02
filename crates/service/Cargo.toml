@@ -1,0 +1,18 @@
+[package]
+name = "service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+clock = { workspace = true }
+ids = { workspace = true }
+domain = { workspace = true }
+store = { workspace = true }
+
+[lints]
+workspace = true

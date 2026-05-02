@@ -1,0 +1,219 @@
+//! HTTP handlers — the only file in the TCB that touches axum.
+//!
+//! Every handler:
+//!   1. Decodes the request via `axum::Json` / `axum::extract::Query`.
+//!   2. Calls one verified `service::Service` method.
+//!   3. Encodes the response with `axum::Json` and an explicit status code.
+//!
+//! The error-code mapping mirrors the Go impl byte-for-byte so the
+//! conformance suite passes against either implementation.
+
+use std::sync::Arc;
+
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+
+use service::{Service, ServiceError};
+
+/// Construct the axum router around `svc`.
+pub fn router(svc: Arc<Service>) -> Router {
+    Router::new()
+        .route("/users", post(create_user))
+        .route("/follow", post(follow).delete(unfollow))
+        .route("/tweets", post(post_tweet))
+        .route("/timeline", get(timeline))
+        .with_state(svc)
+}
+
+#[derive(Serialize)]
+struct ErrBody {
+    error: &'static str,
+}
+
+fn err(status: StatusCode, code: &'static str) -> (StatusCode, Json<ErrBody>) {
+    (status, Json(ErrBody { error: code }))
+}
+
+fn map_err(e: ServiceError) -> (StatusCode, &'static str) {
+    match e {
+        ServiceError::EmptyHandle => (StatusCode::BAD_REQUEST, "empty_handle"),
+        ServiceError::EmptyText => (StatusCode::BAD_REQUEST, "empty_text"),
+        ServiceError::SelfFollow => (StatusCode::BAD_REQUEST, "self_follow_forbidden"),
+        ServiceError::UnknownUser => (StatusCode::BAD_REQUEST, "unknown_user"),
+        ServiceError::DuplicateUser => (StatusCode::CONFLICT, "duplicate_user"),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// POST /users
+// -----------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct CreateUserReq {
+    handle: String,
+}
+
+#[derive(Serialize)]
+struct UserResp {
+    handle: String,
+    id: i64,
+}
+
+async fn create_user(
+    State(svc): State<Arc<Service>>,
+    body: Option<Json<CreateUserReq>>,
+) -> impl IntoResponse {
+    let Json(req) = match body {
+        Some(b) => b,
+        None => return err(StatusCode::BAD_REQUEST, "invalid_json").into_response(),
+    };
+    match svc.create_user(&req.handle) {
+        Ok(u) => (StatusCode::CREATED, Json(UserResp { handle: u.handle, id: u.id }))
+            .into_response(),
+        Err(e) => {
+            let (status, code) = map_err(e);
+            err(status, code).into_response()
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// POST /follow, DELETE /follow
+// -----------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct FollowReq {
+    from: String,
+    to: String,
+}
+
+async fn follow(
+    State(svc): State<Arc<Service>>,
+    body: Option<Json<FollowReq>>,
+) -> impl IntoResponse {
+    let Json(req) = match body {
+        Some(b) => b,
+        None => return err(StatusCode::BAD_REQUEST, "invalid_json").into_response(),
+    };
+    match svc.follow(&req.from, &req.to) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            let (status, code) = map_err(e);
+            err(status, code).into_response()
+        }
+    }
+}
+
+async fn unfollow(
+    State(svc): State<Arc<Service>>,
+    body: Option<Json<FollowReq>>,
+) -> impl IntoResponse {
+    let Json(req) = match body {
+        Some(b) => b,
+        None => return err(StatusCode::BAD_REQUEST, "invalid_json").into_response(),
+    };
+    match svc.unfollow(&req.from, &req.to) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            let (status, code) = map_err(e);
+            err(status, code).into_response()
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// POST /tweets
+// -----------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct TweetReq {
+    author: String,
+    text: String,
+}
+
+#[derive(Serialize)]
+struct TweetResp {
+    id: i64,
+    author: String,
+    text: String,
+    created_at: i64,
+}
+
+async fn post_tweet(
+    State(svc): State<Arc<Service>>,
+    body: Option<Json<TweetReq>>,
+) -> impl IntoResponse {
+    let Json(req) = match body {
+        Some(b) => b,
+        None => return err(StatusCode::BAD_REQUEST, "invalid_json").into_response(),
+    };
+    match svc.post_tweet(&req.author, &req.text) {
+        Ok(t) => (
+            StatusCode::CREATED,
+            Json(TweetResp {
+                id: t.id,
+                author: t.author,
+                text: t.text,
+                created_at: t.created_at,
+            }),
+        )
+            .into_response(),
+        Err(e) => {
+            let (status, code) = map_err(e);
+            err(status, code).into_response()
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// GET /timeline
+// -----------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct TimelineQuery {
+    user: Option<String>,
+    limit: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TimelineResp {
+    tweets: Vec<TweetResp>,
+    next_cursor: Option<String>,
+}
+
+async fn timeline(
+    State(svc): State<Arc<Service>>,
+    Query(q): Query<TimelineQuery>,
+) -> impl IntoResponse {
+    let user = q.user.unwrap_or_default();
+    if user.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "empty_user").into_response();
+    }
+    let limit = match q.limit.as_deref() {
+        Some(s) if !s.trim().is_empty() => match s.trim().parse::<i64>() {
+            Ok(v) if v >= 0 => v as usize,
+            _ => return err(StatusCode::BAD_REQUEST, "invalid_limit").into_response(),
+        },
+        _ => 0,
+    };
+    let tw = svc.home_timeline(&user, limit);
+    let resp = TimelineResp {
+        tweets: tw
+            .into_iter()
+            .map(|t| TweetResp {
+                id: t.id,
+                author: t.author,
+                text: t.text,
+                created_at: t.created_at,
+            })
+            .collect(),
+        next_cursor: None,
+    };
+    (StatusCode::OK, Json(resp)).into_response()
+}

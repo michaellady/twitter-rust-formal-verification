@@ -1,0 +1,21 @@
+/target
+**/*.rs.bk
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor scratch
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# TLC scratch
+specs/states/
+specs/*.dot
+specs/*.dot.pdf
+specs/MC.tla
+specs/MC.cfg
+*.toolbox/

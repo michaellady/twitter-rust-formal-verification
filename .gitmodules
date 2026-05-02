@@ -1,0 +1,4 @@
+[submodule "specs"]
+	path = specs
+	url = git@github.com:michaellady/twitter-formal-spec.git
+	branch = main

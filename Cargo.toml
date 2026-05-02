@@ -1,0 +1,70 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/clock",
+    "crates/ids",
+    "crates/domain",
+    "crates/store",
+    "crates/service",
+    "crates/server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Mike Lady"]
+repository = "https://github.com/michaellady/twitter-rust-formal-verification"
+rust-version = "1.86"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.4", features = ["util"] }
+http = "1"
+http-body-util = "0.1"
+hyper = "1"
+
+clock = { path = "crates/clock" }
+ids = { path = "crates/ids" }
+domain = { path = "crates/domain" }
+store = { path = "crates/store" }
+service = { path = "crates/service" }
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus)"] }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Top-level package hosts the integration / functional / conformance test
+# binaries. It compiles to a tiny lib (re-export of `server`) so the
+# tests/ dir at the workspace root is picked up by `cargo test`.
+[package]
+name = "twitter-rust-formal-verification-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+server = { path = "crates/server" }
+service = { path = "crates/service" }
+clock = { path = "crates/clock" }
+
+[dev-dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
