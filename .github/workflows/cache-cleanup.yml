@@ -1,0 +1,64 @@
+name: cache-cleanup
+
+on:
+  pull_request:
+    types: [closed]
+  schedule:
+    # Weekly retention pass, Mondays 03:00 UTC.
+    - cron: "0 3 * * 1"
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  prune-pr-caches:
+    name: prune branch-scoped caches on PR close
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Delete caches scoped to the PR's merge ref
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          REF="refs/pull/${PR_NUM}/merge"
+          echo "Pruning caches scoped to $REF"
+          IDS=$(gh api --paginate \
+            "repos/${REPO}/actions/caches?ref=${REF}" \
+            --jq '.actions_caches[].id' || true)
+          for id in $IDS; do
+            echo "  delete cache id=$id"
+            gh api -X DELETE "repos/${REPO}/actions/caches/${id}" || true
+          done
+
+  retain-recent:
+    name: weekly retention (keep 5 most recent per prefix)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Keep 5 most recent caches per known prefix
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Known prefixes for this Rust repo's caches.
+          for PREFIX in verus tla; do
+            echo "=== Pruning prefix: ${PREFIX}-* ==="
+            # Sort by last_accessed_at descending; skip the 5 most recent; delete the rest.
+            IDS=$(gh api --paginate \
+              "repos/${REPO}/actions/caches?per_page=100&sort=last_accessed_at&direction=desc" \
+              --jq ".actions_caches[] | select(.key | startswith(\"${PREFIX}-\")) | .id" \
+              | tail -n +6 || true)
+            for id in $IDS; do
+              echo "  delete cache id=$id"
+              gh api -X DELETE "repos/${REPO}/actions/caches/${id}" || true
+            done
+          done

@@ -1,0 +1,16 @@
+name: submodule-gate
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  submodule-gate:
+    name: submodule-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Verify SPEC_SHA matches submodule HEAD
+        run: bash scripts/check_spec_sha.sh
