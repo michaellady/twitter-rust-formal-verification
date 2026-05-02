@@ -1,4 +1,4 @@
-.PHONY: all check test lint cov tlc verus conformance integration functional run clean spec-sha manifest
+.PHONY: all check test lint cov tlc tlc-pr verus conformance integration functional run clean spec-sha manifest
 
 all: check test
 
@@ -12,11 +12,14 @@ lint:
 	cargo clippy --all-targets -- -D warnings
 
 cov:
-	cargo llvm-cov --workspace --fail-under-lines 100 \
+	cargo llvm-cov --fail-under-lines 100 \
 	  -p clock -p ids -p domain -p store -p service
 
 tlc:
-	bash scripts/run_tlc.sh
+	bash scripts/run_tlc.sh specs/twitter.cfg
+
+tlc-pr:
+	bash scripts/run_tlc.sh specs/twitter-pr.cfg
 
 verus:
 	@echo "Verus is best-effort; see README. Install verus and run 'verus crates/<crate>/src/lib.rs'"

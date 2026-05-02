@@ -98,15 +98,42 @@ CI runs Verus best-effort with `continue-on-error: true`. The compile-time path 
 
 ## How to run TLC
 
-The canonical spec lives in `specs/twitter.tla` (consumed via submodule from [michaellady/twitter-formal-spec](https://github.com/michaellady/twitter-formal-spec) at SHA `a534406`).
+The canonical spec lives in `specs/twitter.tla` (consumed via submodule from [michaellady/twitter-formal-spec](https://github.com/michaellady/twitter-formal-spec) at the SHA pinned in `SPEC_SHA`).
 
 ```bash
-make tlc
-# or:
-TLA_VERSION=1.8.0 bash scripts/run_tlc.sh
+make tlc        # full bound — specs/twitter.cfg
+make tlc-pr     # smaller bound — specs/twitter-pr.cfg (PR-time)
+# or directly:
+TLA_VERSION=1.8.0 bash scripts/run_tlc.sh specs/twitter.cfg
 ```
 
 Requires Java 11+. The script will download `tla2tools.jar` to `/tmp/` if it isn't present.
+TLC runs with `-workers $(nproc)` for parallelism.
+
+## CI environment variables
+
+The verify workflow pins the verifier versions in `.github/workflows/verify.yml`:
+
+- `VERUS_VERSION` — Verus release tag (e.g. `release/0.2026.04.24.f8e1704`). Used both as the prebuilt download URL component and as the `actions/cache` key for `~/.verus`.
+- `TLA_VERSION` — `tla2tools.jar` release tag (default `1.8.0`). Used as the cache key for `/tmp/tla2tools-${TLA_VERSION}.jar`.
+
+Bump these in lockstep with any verifier upgrade — the cache key turns over automatically.
+
+## Testing the verification gate
+
+The verify job is currently `continue-on-error: true` (Tier 1+2). After Tier 3 (O10) lands, it will be a real gate. To smoke-test that the gate fails when verification fails:
+
+1. On a throwaway branch:
+   ```bash
+   git checkout -b smoke-verify-gate
+   cp crates/_broken/intentional_failure.rs.txt crates/clock/src/intentional_failure.rs
+   ```
+   (Pick whichever crate matches the verify job you want to smoke.)
+2. Push the branch and open a PR.
+3. The `verify / verus` job MUST fail. If it succeeds, the gate is broken — investigate before merging O10.
+4. Throw away the branch.
+
+The seed file `crates/_broken/intentional_failure.rs.txt` is `.txt`-suffixed so it never compiles by default. Don't rename it on `main`.
 
 ## Bumping the spec
 

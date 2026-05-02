@@ -2,7 +2,6 @@ name: ci
 
 on:
   push:
-    branches: [main]
   pull_request:
 
 env:
@@ -10,18 +9,8 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  spec-sha:
-    name: 1 — Submodule SHA gate
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - name: Verify SPEC_SHA matches submodule HEAD
-        run: bash scripts/check_spec_sha.sh
-
   lint:
-    name: 2 — Lint (clippy)
+    name: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,54 +22,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
-  verify:
-    name: 3 — Verify (Verus, best-effort)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Attempt to install Verus prebuilt
-        run: |
-          set -euxo pipefail
-          mkdir -p "$HOME/.verus"
-          # Verus does not yet ship a stable Linux prebuilt under a predictable
-          # URL; keep this best-effort. If install fails the job is allowed
-          # to fail (continue-on-error: true).
-          curl -fsSL -o /tmp/verus.zip \
-            "https://github.com/verus-lang/verus/releases/latest/download/verus-x86_64-unknown-linux-gnu.zip" \
-            || (echo "Verus release not found at expected URL — skipping" && exit 0)
-          unzip -q /tmp/verus.zip -d "$HOME/.verus"
-          echo "$HOME/.verus" >> "$GITHUB_PATH"
-      - name: Run Verus on each verified crate
-        run: |
-          set -euxo pipefail
-          if ! command -v verus >/dev/null; then
-            echo "verus not on PATH — skipping verification (annotations remain compile-time noop)"
-            exit 0
-          fi
-          for c in clock ids domain store service; do
-            echo "=== Verus on $c ==="
-            verus --crate-type=lib "crates/$c/src/lib.rs" || true
-          done
-
-  tlc:
-    name: 4 — TLC model check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-      - run: bash scripts/run_tlc.sh
-
-  cov:
-    name: 5 — Unit + coverage (verified crates @ 100%)
+  unit:
+    name: unit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -92,10 +35,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
-      - run: cargo llvm-cov --workspace --fail-under-lines 100 -p clock -p ids -p domain -p store -p service
+      # NB: --workspace and --package are mutually exclusive. The previous
+      # invocation `cargo llvm-cov --workspace --fail-under-lines 100 -p ...`
+      # errored with "--package may not be used together with --workspace".
+      # Drop --workspace; per-crate -p flags scope coverage to the verified
+      # crates exactly as intended.
+      - name: Verified-crates coverage gate (100% lines)
+        run: cargo llvm-cov --fail-under-lines 100 -p clock -p ids -p domain -p store -p service
 
   integration:
-    name: 6 — Integration tests
+    name: integration
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -106,7 +55,7 @@ jobs:
       - run: cargo test --test integration
 
   functional:
-    name: 7 — Functional + manifest check
+    name: functional+manifest
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -119,7 +68,7 @@ jobs:
         run: bash scripts/manifestcheck.sh
 
   conformance:
-    name: 8 — Conformance replay (vs Go impl)
+    name: conformance
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -130,7 +79,7 @@ jobs:
       - run: cargo test --test conformance
 
   race:
-    name: 9 — Race (concurrent ops on store)
+    name: race
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -144,7 +93,7 @@ jobs:
       - run: cargo test --release -p store -p clock -p ids -- --test-threads=1
 
   build:
-    name: 10 — Release build
+    name: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

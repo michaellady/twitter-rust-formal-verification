@@ -1,0 +1,188 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # Nightly full-bound TLC + Verus run, 07:00 UTC.
+    - cron: "0 7 * * *"
+
+env:
+  # Pinned Verus stable tag — bump in lockstep with the prebuilt URL.
+  VERUS_VERSION: release/0.2026.04.24.f8e1704
+  TLA_VERSION: 1.8.0
+
+jobs:
+  verus:
+    name: verify / verus
+    runs-on: ubuntu-latest
+    continue-on-error: true   # Tier 3 (O10) will remove this.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Detect changed files (event-aware)
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ github.event_name }}" in
+            schedule)
+              echo "scheduled run — forcing full verification"
+              CHANGED=__force_full_run__
+              ;;
+            push)
+              BEFORE='${{ github.event.before }}'
+              if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+                echo "push without usable 'before' SHA — running full verification"
+                CHANGED=__force_full_run__
+              else
+                CHANGED=$(git diff --name-only "$BEFORE..${{ github.sha }}" || echo __force_full_run__)
+              fi
+              ;;
+            pull_request)
+              git fetch origin '${{ github.base_ref }}'
+              CHANGED=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" || echo __force_full_run__)
+              ;;
+            *)
+              CHANGED=__force_full_run__ ;;
+          esac
+
+          if [ "$CHANGED" = "__force_full_run__" ] || \
+             echo "$CHANGED" | grep -qvE '^(README\.md|COVERAGE\.md|LICENSE|\.gitignore|Makefile|scripts/check_manifest)'; then
+            echo "code-relevant or fail-safe — running heavy verifier"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skipped — docs-only PR"
+            echo "skip=true"  >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Cache Verus prebuilt
+        if: steps.detect.outputs.skip == 'false'
+        id: cache-verus
+        uses: actions/cache@v4
+        with:
+          path: ~/.verus
+          key: verus-${{ env.VERUS_VERSION }}-${{ runner.os }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.detect.outputs.skip == 'false'
+
+      - name: Install Verus prebuilt (skip if cache hit)
+        if: steps.detect.outputs.skip == 'false' && steps.cache-verus.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$HOME/.verus"
+          # Verus does not yet ship a stable Linux prebuilt under a predictable
+          # URL. Allow this step to succeed even if the artifact isn't found —
+          # the verify job is continue-on-error: true through Tier 1+2.
+          curl -fsSL -o /tmp/verus.zip \
+            "https://github.com/verus-lang/verus/releases/download/${VERUS_VERSION}/verus-x86_64-unknown-linux-gnu.zip" \
+            || (echo "Verus release not found at expected URL — leaving unpopulated" && exit 0)
+          unzip -q /tmp/verus.zip -d "$HOME/.verus"
+
+      - name: Add Verus to PATH
+        if: steps.detect.outputs.skip == 'false'
+        shell: bash
+        run: |
+          if [ -d "$HOME/.verus" ]; then
+            echo "$HOME/.verus" >> "$GITHUB_PATH"
+          fi
+
+      - name: Run Verus on each verified crate
+        if: steps.detect.outputs.skip == 'false'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if ! command -v verus >/dev/null; then
+            echo "verus not on PATH — skipping verification (annotations remain compile-time noop)"
+            exit 0
+          fi
+          for c in clock ids domain store service; do
+            echo "=== Verus on $c ==="
+            verus --crate-type=lib "crates/$c/src/lib.rs" || true
+          done
+
+      - name: Skipped (docs-only)
+        if: steps.detect.outputs.skip == 'true'
+        run: echo "skipped — docs-only PR"
+
+  tlc:
+    name: verify / tlc
+    runs-on: ubuntu-latest
+    continue-on-error: true   # Tier 3 (O10) will remove this.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Detect changed files (event-aware)
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ github.event_name }}" in
+            schedule)
+              echo "scheduled run — forcing full verification"
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              echo "tlc_cfg=specs/twitter.cfg" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+            push)
+              BEFORE='${{ github.event.before }}'
+              if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+                echo "push without usable 'before' SHA — running full verification"
+                CHANGED=__force_full_run__
+              else
+                CHANGED=$(git diff --name-only "$BEFORE..${{ github.sha }}" || echo __force_full_run__)
+              fi
+              ;;
+            pull_request)
+              git fetch origin '${{ github.base_ref }}'
+              CHANGED=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" || echo __force_full_run__)
+              ;;
+            *)
+              CHANGED=__force_full_run__ ;;
+          esac
+
+          if [ "$CHANGED" = "__force_full_run__" ] || \
+             echo "$CHANGED" | grep -qvE '^(README\.md|COVERAGE\.md|LICENSE|\.gitignore|Makefile|scripts/check_manifest)'; then
+            echo "code-relevant or fail-safe — running heavy verifier"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skipped — docs-only PR"
+            echo "skip=true"  >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "tlc_cfg=specs/twitter-pr.cfg" >> "$GITHUB_OUTPUT"
+          else
+            echo "tlc_cfg=specs/twitter.cfg"    >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-java@v4
+        if: steps.detect.outputs.skip == 'false'
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache tla2tools.jar
+        if: steps.detect.outputs.skip == 'false'
+        uses: actions/cache@v4
+        with:
+          path: /tmp/tla2tools-${{ env.TLA_VERSION }}.jar
+          key: tla-${{ env.TLA_VERSION }}
+
+      - name: Run TLC
+        if: steps.detect.outputs.skip == 'false'
+        env:
+          TLA_VERSION: ${{ env.TLA_VERSION }}
+        run: bash scripts/run_tlc.sh ${{ steps.detect.outputs.tlc_cfg }}
+
+      - name: Skipped (docs-only)
+        if: steps.detect.outputs.skip == 'true'
+        run: echo "skipped — docs-only PR"

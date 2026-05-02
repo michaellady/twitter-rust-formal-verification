@@ -1,0 +1,14 @@
+// Intentional-failure smoke source for O10 verify-gate validation.
+// DO NOT rename this file to remove the .txt suffix in production —
+// copy it (with rename) only on a throwaway branch to validate that
+// the verify gate fails as expected. See README "Testing the
+// verification gate".
+
+#[cfg(verus)]
+verus! {
+    proof fn always_fails()
+        ensures false
+    {
+        // Empty body — body cannot prove `false`.
+    }
+}

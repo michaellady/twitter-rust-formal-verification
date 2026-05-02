@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
 # Run the TLA+ TLC bounded model checker against the canonical spec.
 #
+# Usage: bash scripts/run_tlc.sh [config-path]
+#   config-path: path to the TLA config relative to repo root.
+#                Defaults to specs/twitter.cfg.
+#                For PR (smaller bound), use specs/twitter-pr.cfg.
+#
 # In CI we use a pinned tla2tools.jar; locally either set TLA_TOOLS to the
 # jar path or the script will download a known-good release.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+CFG="${1:-specs/twitter.cfg}"
+if [ ! -f "$CFG" ]; then
+  echo "TLC config not found: $CFG" >&2
+  exit 1
+fi
 
 TLA_VERSION="${TLA_VERSION:-1.8.0}"
 TLA_JAR="${TLA_TOOLS:-/tmp/tla2tools-${TLA_VERSION}.jar}"
@@ -21,6 +32,11 @@ if ! command -v java >/dev/null; then
   exit 1
 fi
 
-echo "Running TLC on specs/twitter.tla …"
+WORKERS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+
+# Resolve the .cfg path relative to specs/ since TLC runs from there.
+CFG_NAME="$(basename "$CFG")"
+echo "Running TLC on specs/twitter.tla with config $CFG ($WORKERS workers) …"
 cd specs
-java -XX:+UseParallelGC -cp "$TLA_JAR" tlc2.TLC -config twitter.cfg twitter.tla
+java -XX:+UseParallelGC -cp "$TLA_JAR" tlc2.TLC \
+  -workers "$WORKERS" -config "$CFG_NAME" twitter.tla
