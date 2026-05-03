@@ -28,7 +28,63 @@ pub fn router(svc: Arc<Service>) -> Router {
         .route("/follow", post(follow).delete(unfollow))
         .route("/tweets", post(post_tweet))
         .route("/timeline", get(timeline))
+        .route("/healthz", get(healthz))
+        .route("/version", get(version))
         .with_state(svc)
+}
+
+// -----------------------------------------------------------------------------
+// GET /healthz — liveness/readiness probe used by Fly's load balancer
+// (Tier-4 phase 1)
+// -----------------------------------------------------------------------------
+
+async fn healthz() -> impl IntoResponse {
+    (StatusCode::OK, "ok\n")
+}
+
+// -----------------------------------------------------------------------------
+// GET /version — image provenance (Tier-4 phase 1; baked into image at build time)
+//
+// Reads `/etc/version.json` written by the build-image-main job in
+// verify.yml. On rollback the previous image is re-pulled, so /version
+// automatically reports the rolled-back release's digest — no env-var
+// sync required (K21 fix from the converged Tier-4 plan).
+// -----------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct VersionResp {
+    git_sha: String,
+    image_digest: String,
+    process_uptime_seconds: u64,
+    snapshot_version: u32,
+}
+
+async fn version() -> impl IntoResponse {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let start = START.get_or_init(std::time::Instant::now);
+    let uptime = start.elapsed().as_secs();
+
+    // Defaults: dev/local runs without a baked image.
+    let mut git_sha = String::from("dev");
+    let mut image_digest = String::from("sha256:dev");
+
+    if let Ok(s) = std::fs::read_to_string("/etc/version.json") {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+            if let Some(g) = v.get("git_sha").and_then(|x| x.as_str()) {
+                git_sha = g.to_string();
+            }
+            if let Some(d) = v.get("image_digest").and_then(|x| x.as_str()) {
+                image_digest = d.to_string();
+            }
+        }
+    }
+
+    Json(VersionResp {
+        git_sha,
+        image_digest,
+        process_uptime_seconds: uptime,
+        snapshot_version: 1,
+    })
 }
 
 #[derive(Serialize)]

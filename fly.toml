@@ -1,0 +1,43 @@
+# Fly.io config for twitter-formal-rust (the primary backend).
+# Created by Tier-4 Phase 1.
+#
+# Manual setup before first deploy (see DEPLOY.md):
+#   1. flyctl auth login
+#   2. flyctl apps create twitter-formal-rust  (or pick another name and
+#      update `app` below + the workflow's vars.FLY_APP)
+#   3. flyctl secrets set FLY_API_TOKEN=<token from `flyctl tokens create deploy`>
+#      then push that token to the GitHub repo's secret of the same name
+
+app = "twitter-formal-rust"
+primary_region = "iad"  # Ashburn — change if your latency story is different
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  RUST_LOG = "info"
+  STREAM_2_ENABLED = "false"  # flip to true after stream 2 phase 0 lands
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"   # cost: free tier sleeps when idle
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 250
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "15s"
+    method = "GET"
+    timeout = "5s"
+    path = "/healthz"
+
+[vm]
+  size = "shared-cpu-1x"
+  memory = "256mb"
