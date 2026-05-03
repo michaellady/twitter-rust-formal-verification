@@ -30,11 +30,81 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  e2e:
-    name: e2e
+  # PR-only job: boot local Rust server, run e2e against it.
+  e2e-pr:
+    name: e2e (PR — local Rust server)
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # On workflow_run, gate on the upstream deploy succeeding.
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    defaults:
+      run:
+        working-directory: e2e
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: npm install
+        run: npm install --no-audit --no-fund
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build server
+        working-directory: ${{ github.workspace }}
+        run: cargo build --release -p server
+
+      - name: Boot local server
+        working-directory: ${{ github.workspace }}
+        run: |
+          SEED_DEMO=true PORT=8080 ./target/release/server &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
+              echo "server up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "server failed to start" >&2
+          exit 1
+
+      - name: Run Playwright tests
+        env:
+          BASE_URL: http://127.0.0.1:8080
+          PLAYWRIGHT_RUN_ID: gha-${{ github.run_id }}
+        run: npm test
+
+      - name: Upload report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-pr-${{ github.run_id }}
+          path: e2e/playwright-report/
+          retention-days: 14
+
+  # Production / nightly job: matrix-fan over BOTH live backends. Same
+  # Playwright suite, different BASE_URL — confirms the two impls are
+  # behavior-equivalent at the conformance layer (the JSON envelope shape,
+  # the sort order, the error-code mapping). When this passes against
+  # both, the two backends are pre-Stream-2 confirmation that the spec
+  # holds end-to-end on each independently.
+  e2e-live:
+    name: "e2e (live: ${{ matrix.target }})"
+    if: github.event_name != 'pull_request' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: rust
+            base_url: https://twitter-formal-rust.fly.dev
+          - target: go
+            base_url: https://twitter-formal-go.fly.dev
     defaults:
       run:
         working-directory: e2e
@@ -54,56 +124,16 @@ jobs:
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
 
-      # ---------------------------------------------------------------
-      # Choose target: local server for PRs, live production otherwise.
-      # ---------------------------------------------------------------
-
-      - name: Choose BASE_URL
-        id: target
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "base_url=http://127.0.0.1:8080" >> "$GITHUB_OUTPUT"
-            echo "needs_local=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "base_url=https://twitter-formal-rust.fly.dev" >> "$GITHUB_OUTPUT"
-            echo "needs_local=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Setup Rust toolchain (PR only)
-        if: steps.target.outputs.needs_local == 'true'
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build server (PR only)
-        if: steps.target.outputs.needs_local == 'true'
-        working-directory: ${{ github.workspace }}
-        run: cargo build --release -p server
-
-      - name: Boot local server (PR only)
-        if: steps.target.outputs.needs_local == 'true'
-        working-directory: ${{ github.workspace }}
-        run: |
-          SEED_DEMO=true PORT=8080 ./target/release/server &
-          echo $! > /tmp/server.pid
-          for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
-              echo "server up"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "server failed to start" >&2
-          exit 1
-
-      - name: Run Playwright tests
+      - name: Run Playwright tests against ${{ matrix.target }}
         env:
-          BASE_URL: ${{ steps.target.outputs.base_url }}
-          PLAYWRIGHT_RUN_ID: gha-${{ github.run_id }}
+          BASE_URL: ${{ matrix.base_url }}
+          PLAYWRIGHT_RUN_ID: gha-${{ github.run_id }}-${{ matrix.target }}
         run: npm test
 
       - name: Upload report on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report-${{ github.run_id }}
+          name: playwright-report-${{ matrix.target }}-${{ github.run_id }}
           path: e2e/playwright-report/
           retention-days: 14
