@@ -18,10 +18,15 @@ path = "src/main.rs"
 [dependencies]
 service = { workspace = true }
 clock = { workspace = true }
+domain = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+hex = "0.4"
+hmac = "0.12"
+sha2 = "0.10"
+urlencoding = "2.1"
 
 [lints]
 workspace = true

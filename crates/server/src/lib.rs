@@ -9,5 +9,6 @@
 //! conformance, and race tests.
 
 pub mod handlers;
+pub mod ui;
 
 pub use handlers::router;
