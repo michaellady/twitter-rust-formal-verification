@@ -54,18 +54,28 @@ jobs:
             --strategy immediate \
             --wait-timeout 5m
 
-      - name: Post-deploy /version digest verification
+      - name: "Post-deploy /version git_sha verification"
         run: |
           set -euo pipefail
-          DIGEST=$(cat image-digest.txt)
+          # Why git_sha and not image_digest: the verify.yml two-pass build
+          # bakes pass1's digest into pass2's image (pass2 cannot bake its
+          # own pre-existing digest — chicken/egg). Deploy uses pass2's
+          # image; /version inside pass2 reports pass1's digest. So digest
+          # equality between artifact and /version is impossible by design.
+          # git_sha IS deterministic across both passes and across rebuilds,
+          # so we verify that instead. Image-digest provenance is still
+          # established by deploy.yml's pull-by-digest (the bytes Fly serves
+          # are exactly what we pushed); the bake just gives /version
+          # something stable to report after rollback.
+          EXPECTED="${{ github.event.workflow_run.head_sha }}"
           for i in $(seq 1 12); do
-            ACTUAL=$(curl -fsS "https://${{ vars.FLY_APP }}.fly.dev/version" 2>/dev/null | jq -r .image_digest 2>/dev/null || echo "pending")
-            if [ "$ACTUAL" = "$DIGEST" ]; then
-              echo "OK: /version reports $ACTUAL"
+            ACTUAL=$(curl -fsS "https://${{ vars.FLY_APP }}.fly.dev/version" 2>/dev/null | jq -r .git_sha 2>/dev/null || echo "pending")
+            if [ "$ACTUAL" = "$EXPECTED" ]; then
+              echo "OK: /version.git_sha = $ACTUAL"
               exit 0
             fi
-            echo "/version reports $ACTUAL, want $DIGEST (attempt $i/12)"
+            echo "/version.git_sha = $ACTUAL, want $EXPECTED (attempt $i/12)"
             sleep 5
           done
-          echo "::error::DEPLOY MISMATCH after 60s: pushed $DIGEST but /version reports $ACTUAL" >&2
+          echo "::error::DEPLOY MISMATCH after 60s: expected git_sha $EXPECTED, /version reports $ACTUAL" >&2
           exit 1

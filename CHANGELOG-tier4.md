@@ -23,6 +23,7 @@ Every Tier-4 PR MUST append at least one line under the appropriate section. The
 
 - Quote two workflow step names in `.github/workflows/verify.yml` (`Build and push (pass 1: …)` and `Re-tag with version baked in (pass 2)`) so the YAML parser doesn't trip on `+` in the unquoted scalar. The Phase 1 squash-merge raced ahead of the original fix commit and landed the broken YAML on main; this patches it.
 - Dockerfile: distroless final stage has no `/bin/sh`, so `RUN printf …` to bake `/etc/version.json` failed at image build. Move the printf into the builder stage and COPY the resulting `version.json` into the distroless final stage. Image-digest provenance still works the same way at runtime.
+- `deploy.yml` post-deploy verification: switch the check from `image_digest` to `git_sha`. The two-pass image build inherently can't bake pass2's own digest (chicken/egg), so `/version.image_digest` always reports pass1's digest while the deploy artifact is pass2's. `git_sha` is deterministic across both passes and across rollbacks; that's what we actually want to verify. Image-byte provenance is still established by deploy.yml pulling by exact digest.
 
 ### Trust-Boundary
 
