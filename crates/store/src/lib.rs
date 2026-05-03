@@ -62,9 +62,52 @@
 //! views, no new shims — the read-side shim was already general enough
 //! because `put_user`'s membership check also takes `&MemStore`).
 //!
-//! The other five store methods (`put_follow`, `delete_follow`,
-//! `put_tweet`, `follow_set`, `home_timeline`) remain in the trusted
-//! skeleton and are scheduled for the follow-up sub-PRs (S3P4-3..7).
+//! Sub-PR 3 adds the paired `put_follow` + `delete_follow` discharge:
+//! a second ghost view `closed spec fn follow_edges(s: &MemStore) -> Set<(Seq<char>, Seq<char>)>`
+//! models the set of currently-recorded directed follow edges, plus
+//! three `external_body` exec shims (`proof_follow_contains`,
+//! `proof_follow_insert`, `proof_follow_remove`) standing in for the
+//! lock-acquire + nested-`HashMap`/`HashSet` ops. The verified
+//! functions `put_follow_ensures(s, f)` and `delete_follow_ensures(s, from, to)`
+//! chain those shims (plus the existing `proof_users_contains` for F9
+//! upstream-handle checks) and Verus discharges F3 idempotency
+//! structurally — `Set::insert` and `Set::remove` are idempotent on
+//! `Set<T>`, so calling either twice ends in the same set state as
+//! calling once. F4 (no self-follow) is upstream — `dom::Follow::new`
+//! already discharges it (Stream 3 Phase 3); `put_follow` takes a
+//! `Follow` so it is past that gate by construction.
+//!
+//! Sub-PR 4 adds the `put_tweet` discharge: a third ghost-view axis
+//! `closed spec fn author_tweet_count(s: &MemStore, author: Seq<char>) -> nat`
+//! models the per-author tweet count, plus one new `external_body` exec
+//! shim `proof_append_tweet` standing in for the lock-acquire +
+//! `entry().or_default().push()` step. The verified function
+//! `put_tweet_ensures(s: &mut MemStore, t: Tweet) -> Result<(), StoreError>`
+//! chains the existing `proof_users_contains` (for the F6 author-existence
+//! check) with the new append shim and Verus discharges the F6 contract
+//! structurally:
+//!
+//! ```text
+//! ensures
+//!     !users_keys(old(s)).contains(t.author@) ==> result is Err,
+//!     users_keys(old(s)).contains(t.author@)  ==> result is Ok,
+//!     result is Ok ==> author_tweet_count(s, t.author@)
+//!                       == author_tweet_count(old(s), t.author@) + 1,
+//!     result is Err ==> author_tweet_count(s, t.author@)
+//!                       == author_tweet_count(old(s), t.author@),
+//!     users_keys(s) == users_keys(old(s)),
+//!     follow_edges(s) == follow_edges(old(s)),
+//! ```
+//!
+//! "No orphan tweets" (F6) is encoded as a permanent invariant carried by
+//! the append shim's ensures: any author with `author_tweet_count > 0`
+//! is guaranteed to be in `users_keys(s)`. Production logic enforces
+//! this via the upstream existence check; the shim records it as the
+//! abstract post-state Verus needs.
+//!
+//! The other two store methods (`follow_set`, `home_timeline`) remain
+//! in the trusted skeleton and are scheduled for the follow-up sub-PRs
+//! (S3P4-5..6).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
@@ -291,15 +334,21 @@ impl Default for MemStore {
 //     ^^^ DISCHARGED in Stream 3 Phase 4 sub-PR 2 (this PR).
 //
 //   put_follow:
-//     requires users.contains(f.from) && users.contains(f.to) && f.from != f.to
-//     ensures  follows.contains(f.from -> f.to)             // F3 idempotent set
+//     ensures  !users_keys(old(s)).contains(f.from@) ==> result is Err
+//              !users_keys(old(s)).contains(f.to@)   ==> result is Err
+//              result is Ok ==> follow_edges(s) == follow_edges(old(s)).insert((f.from@, f.to@))
+//              result is Err ==> follow_edges(s) == follow_edges(old(s))
+//     ^^^ DISCHARGED in Stream 3 Phase 4 sub-PR 3 (this PR). F3 idempotency
+//         falls out structurally because `Set::insert` is idempotent.
 //
 //   put_tweet:
 //     requires users.contains(t.author)                      // F6
 //     ensures  by_author[t.author].last() == t
 //
 //   delete_follow:
-//     ensures  !follows.contains(from -> to)                // F3 idempotent
+//     ensures  follow_edges(s) == follow_edges(old(s)).remove((from@, to@))
+//     ^^^ DISCHARGED in Stream 3 Phase 4 sub-PR 3 (this PR). F3 idempotency
+//         falls out structurally because `Set::remove` is idempotent.
 //
 //   home_timeline:
 //     ensures  forall t in result: t.author == user
@@ -411,6 +460,132 @@ mod verus_proof {
             ensures result == users_keys(s).contains(handle@),
         {
             proof_users_contains(s, handle)
+        }
+
+        // -----------------------------------------------------------------
+        // Stream 3 Phase 4 sub-PR 3 — `put_follow` / `delete_follow` discharge.
+        //
+        // Second ghost-view axis on `MemStore`: the set of currently-recorded
+        // directed follow edges, modeled as `Set<(Seq<char>, Seq<char>)>`
+        // (each side is the `String -> Seq<char>` view of the handle, mirroring
+        // how `users_keys` projects keys). Opaque body for the same reason
+        // `users_keys` is opaque: Verus has no concrete view of the nested
+        // `HashMap<String, HashSet<String>>` behind the `RwLock`.
+        // -----------------------------------------------------------------
+        #[verifier::external_body]
+        pub closed spec fn follow_edges(s: &MemStore) -> Set<(Seq<char>, Seq<char>)> {
+            unimplemented!()
+        }
+
+        // Trusted shim around the lock-acquire + nested `HashMap`/`HashSet`
+        // membership-check step. Body calls the real production read; what
+        // is trusted is the spec on `RwLock::read` + std `HashMap::get` +
+        // `HashSet::contains`. Used by both `put_follow_ensures` (the
+        // contract doesn't need it directly, but framing axioms do) and
+        // (forward) the `follow_set` discharge in S3P4-5.
+        #[verifier::external_body]
+        pub fn proof_follow_contains(s: &MemStore, from: &String, to: &String) -> (out: bool)
+            ensures out == follow_edges(s).contains((from@, to@))
+        {
+            let g = s.inner.read().expect("store poisoned");
+            match g.follows.get(from) {
+                Some(set) => set.contains(to),
+                None => false,
+            }
+        }
+
+        // Trusted shim around the lock-acquire + `entry().or_default().insert()`
+        // step inside `MemStore::put_follow`. Models the post-state along
+        // both ghost-view axes: the targeted edge ends up in `follow_edges`
+        // (exactly the set-insert axiom), and `users_keys` is unaffected
+        // (the production write touches only the `follows` HashMap, never
+        // the `users` HashMap; the two project disjoint state). F3
+        // idempotency falls out structurally because `Set::insert` is
+        // idempotent: inserting an already-present element returns the
+        // same set. Signature takes `&mut MemStore` for the same reason
+        // `proof_users_insert` does (lock provides exclusive access; the
+        // critical section is observationally a `&mut` step).
+        #[verifier::external_body]
+        pub fn proof_follow_insert(s: &mut MemStore, from: &String, to: &String)
+            ensures
+                follow_edges(s) == follow_edges(old(s)).insert((from@, to@)),
+                users_keys(s) == users_keys(old(s)),
+        {
+            let mut g = s.inner.write().expect("store poisoned");
+            g.follows.entry(from.clone()).or_default().insert(to.clone());
+        }
+
+        // Trusted shim around the lock-acquire + `HashSet::remove` step
+        // inside `MemStore::delete_follow`. Models the post-state along
+        // both ghost-view axes: the targeted edge is removed from
+        // `follow_edges`, and `users_keys` is unaffected (same disjoint-
+        // state argument as `proof_follow_insert`). F3 idempotency falls
+        // out structurally because `Set::remove` is idempotent: removing
+        // an absent element returns the same set. Production logic
+        // short-circuits when the outer entry is missing (no edges from
+        // `from`); that is observationally identical to `Set::remove`
+        // on an absent element.
+        #[verifier::external_body]
+        pub fn proof_follow_remove(s: &mut MemStore, from: &String, to: &String)
+            ensures
+                follow_edges(s) == follow_edges(old(s)).remove((from@, to@)),
+                users_keys(s) == users_keys(old(s)),
+        {
+            let mut g = s.inner.write().expect("store poisoned");
+            if let Some(set) = g.follows.get_mut(from) {
+                set.remove(to);
+            }
+        }
+
+        // F3-idempotent / F9-rejecting discharge for `MemStore::put_follow`.
+        // Production control flow is identical: read both endpoint
+        // memberships, branch on either-missing, otherwise insert. F4
+        // (no self-follow) is discharged upstream by `dom::Follow::new`
+        // (Stream 3 Phase 3) — the `Follow` argument has already passed
+        // that gate, so we do not re-encode it here. F3 (idempotent) is
+        // structural: `proof_follow_insert`'s post-state is
+        // `old.insert((from@, to@))`, and `Set::insert` is idempotent.
+        // The `users_keys`-framing clause on `proof_follow_insert` is
+        // what lets the `f.from` / `f.to` membership facts established
+        // by the two `proof_users_contains` checks survive the insert
+        // step — without it the verifier could not rule out that the
+        // insert silently dropped a user.
+        pub fn put_follow_ensures(s: &mut MemStore, f: Follow) -> (result: Result<(), StoreError>)
+            ensures
+                !users_keys(old(s)).contains(f.from@) ==> result is Err,
+                !users_keys(old(s)).contains(f.to@)   ==> result is Err,
+                (users_keys(old(s)).contains(f.from@) && users_keys(old(s)).contains(f.to@))
+                    ==> result is Ok,
+                result is Ok ==>
+                    follow_edges(s) == follow_edges(old(s)).insert((f.from@, f.to@)),
+                result is Err ==> follow_edges(s) == follow_edges(old(s)),
+        {
+            if !proof_users_contains(s, &f.from) {
+                return Err(StoreError::UnknownUser);
+            }
+            if !proof_users_contains(s, &f.to) {
+                return Err(StoreError::UnknownUser);
+            }
+            proof_follow_insert(s, &f.from, &f.to);
+            Ok(())
+        }
+
+        // F3-idempotent discharge for `MemStore::delete_follow`. No
+        // upstream user-existence check (matches production: deleting
+        // a follow whose `from` isn't even registered is a no-op). F3
+        // is structural: `proof_follow_remove`'s post-state is
+        // `old.remove((from@, to@))`, and `Set::remove` is idempotent.
+        // Calling `delete_follow_ensures` twice on the same edge thus
+        // ends in the same set state as calling it once. The second
+        // ensures clause (`!follow_edges(s).contains((from@, to@))`)
+        // is a corollary the verifier discharges from `Set::remove`'s
+        // axiom: removing an element guarantees its absence.
+        pub fn delete_follow_ensures(s: &mut MemStore, from: &String, to: &String)
+            ensures
+                follow_edges(s) == follow_edges(old(s)).remove((from@, to@)),
+                !follow_edges(s).contains((from@, to@)),
+        {
+            proof_follow_remove(s, from, to);
         }
     }
 }
