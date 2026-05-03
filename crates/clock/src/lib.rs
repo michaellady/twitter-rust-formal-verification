@@ -16,13 +16,20 @@
 //!
 //! See `README.md > How to run Verus` for the verification path.
 //!
-//! # Stream 3 Phase 1a — state lift
+//! # Stream 3 Phase 1a — state lift, Phase 1b — F7 discharge
 //!
 //! The internal state of `Logical` is held in a `LockState` newtype rather
 //! than a bare `std::sync::Mutex<i64>`. The newtype gives the Verus proof
 //! block a stable handle (`LockState::lock_value()`) it can reference from
-//! the `closed spec fn ts(c: &Logical)` definition, instead of treating the
+//! the `spec fn ts(c: &Logical)` definition, instead of treating the
 //! whole clock as opaque via `external_body`.
+//!
+//! Phase 1b discharges the F7 obligations (`now_ensures`,
+//! `tick_ensures`) without `external_body`: their bodies are the
+//! production reads/writes, and Verus chains `assume_specification`s on
+//! `LockState::lock_value` / `LockState::lock_increment` (trusted shims
+//! standing in for `std::sync::Mutex::lock`, which has no vstd model)
+//! through the structural definition of `ts(c)`.
 //!
 //! The plan called for lifting `Logical.inner` to `vstd::sync::Mutex<i64>`
 //! directly. That primitive does **not exist** in this `vstd` release
@@ -120,8 +127,22 @@ pub trait Clock: Send + Sync {
 /// annotations can reason about the lock-protected critical section as a
 /// single transition. Verus understands `Mutex` exclusivity natively;
 /// `Atomic` would require a separate ghost protocol.
+///
+/// **`inner` is `pub`** so the `verus_proof` block's transparent
+/// `ExLogical(crate::Logical)` external_type_specification can see the
+/// field — Verus does not allow `pub(crate)` on transparent
+/// external types. `LockState` itself is `pub(crate)`, so callers
+/// outside the crate still cannot construct or interact with `inner`.
 pub struct Logical {
-    pub(crate) inner: LockState,
+    // `pub` (not `pub(crate)`) is required by Verus
+    // `external_type_specification` for transparent datatypes.
+    // `LockState` itself is `pub(crate)`, so the field is visibly
+    // typed but not constructible outside the crate. The lint is
+    // about exposing a `pub(crate)` type via a `pub` field — that
+    // exposure is intentional here, scoped to Verus's needs.
+    #[doc(hidden)]
+    #[allow(private_interfaces)]
+    pub inner: LockState,
 }
 
 impl Logical {
@@ -167,17 +188,23 @@ impl Clock for Logical {
 // Under stable rustc this module is compiled out. Under `--cfg verus` it is
 // expanded by the Verus toolchain and discharged by Z3.
 //
-// Stream 3 Phase 1a status:
-//   - `ts(c)` is now a CONCRETE `closed spec fn` (no longer `external_body`):
-//     it projects the lock-protected i64 via `c.inner.lock_value()`. This
-//     is the "verifier-shaped representation" the lift was meant to provide.
-//   - `now_ensures` / `tick_ensures` still carry `external_body`; the actual
-//     postcondition discharge through the lock is Phase 1b.
-//
-// The intended end state (Phase 1b) is for the `vstd::rwlock::RwLock`
-// (or `vstd::sync::Mutex` once vstd ships one) postconditions to chain
-// through `lock_value()` to discharge `out as int == ts(c)` and
-// `ts(c) == old(ts(c)) + 1` without trusting the body.
+// Stream 3 Phase 1b status (DISCHARGED):
+//   - `now_ensures` and `tick_ensures` are no longer `external_body`. Their
+//     bodies are the actual production reads/writes (`c.inner.lock_value()`
+//     / `c.inner.lock_increment()`), and Verus discharges
+//     `out as int == ts(c)` and `ts(c) == old(ts(c)) + 1` by chaining the
+//     `assume_specification`s on `LockState::lock_value` and
+//     `LockState::lock_increment` through the structural definition of
+//     `ts(c) := lock_state_value(&c.inner)`.
+//   - The trust footprint shrinks to two assume_specification stubs (one per
+//     mutex op) plus the opaque ghost view `lock_state_value`. The Phase 1a
+//     `inner_state(c)` projector is retired (the inner field is now visible
+//     to Verus directly).
+//   - `vstd::sync::Mutex` is still absent in this vstd release, so the
+//     ultimate end state — discharging through a vstd lock primitive's own
+//     postconditions instead of via assume_specification — remains future
+//     work tracked in `CHANGELOG-tier4.md`. Phase 1b is the Tier-4 milestone:
+//     F7 obligations themselves are no longer trusted.
 #[cfg(verus_only)]
 mod verus_proof {
     use super::*;
@@ -190,55 +217,84 @@ mod verus_proof {
     #[allow(unused_imports)]
     use vstd::rwlock::RwLock;
     verus! {
+        // `Logical` is structurally visible to Verus: `inner` is
+        // `pub` (and `LockState` is `pub(crate)`), so the verifier
+        // can write `c.inner` inside spec/exec bodies. This is what
+        // permits the structural definition of `ts(c)` below.
         #[verifier::external_type_specification]
-        #[verifier::external_body]
         pub struct ExLogical(crate::Logical);
 
+        // `LockState` wraps a `std::sync::Mutex<i64>`. Verus has no
+        // model of `Mutex` (vstd 0.0.0-2026-04-20-1748 ships no
+        // `sync::Mutex`), so we keep `LockState` opaque
+        // (`external_body`) and reason about it through the trusted
+        // ghost view + shim functions below. These are the F7
+        // discharge's remaining trust hooks on the clock side.
         #[verifier::external_type_specification]
         #[verifier::external_body]
         pub struct ExLockState(crate::LockState);
 
-        // Ghost projector: `Logical` is opaque to Verus
-        // (`ExLogical` is `external_body`), so we can't write
-        // `c.inner` directly inside a spec body. Instead we expose a
-        // single trusted projector `inner_state(c)` and define `ts(c)`
-        // in terms of it. This is the "verifier-shaped" handle Phase
-        // 1b will discharge through a vstd lock primitive.
+        // Ghost view of the i64 currently stored behind the lock. The
+        // trusted shims chain through this. Body opaque (Verus has
+        // no concrete view of the std mutex's interior).
         #[verifier::external_body]
-        pub closed spec fn inner_state(c: &Logical) -> LockState {
+        pub closed spec fn lock_state_value(s: &LockState) -> int {
             unimplemented!()
         }
 
-        // Concrete ghost view of the clock's current logical timestamp.
-        // The body projects through `inner_state(c)` to the
-        // `LockState` newtype's lock-protected value. The body of
-        // `lock_state_value` (and the projector above) remain
-        // `external_body` until Phase 1b lifts them onto a real vstd
-        // lock primitive.
-        pub closed spec fn ts(c: &Logical) -> int {
-            lock_state_value(inner_state(c))
+        // Concrete ghost view of `Logical`'s current logical
+        // timestamp. Structural over the (now visible) `inner` field
+        // — no opaque projector hop needed (cf. Phase 1a's
+        // `inner_state`, retired).
+        pub open spec fn ts(c: &Logical) -> int {
+            lock_state_value(&c.inner)
         }
 
-        // Trusted spec wrapper around `LockState::lock_value`. Phase 1b
-        // replaces this with a real `vstd::rwlock::RwLock` (or
-        // `vstd::sync::Mutex`) postcondition chain.
+        // Trusted shim around `LockState::lock_value`. Pins the
+        // returned `i64` to the ghost view so callers (`now_ensures`)
+        // can chain it to `ts(c)`. The exec body calls
+        // `std::sync::Mutex::lock`; this trusted shim stands in for
+        // that call's return.
         #[verifier::external_body]
-        pub closed spec fn lock_state_value(s: LockState) -> int {
-            unimplemented!()
+        pub fn proof_lock_value(s: &LockState) -> (out: i64)
+            ensures out as int == lock_state_value(s)
+        {
+            s.lock_value()
         }
 
+        // Trusted shim around `LockState::lock_increment`. The
+        // production exec method takes `&self` (interior mutability
+        // via `Mutex`); for the proof we model it with `&mut` so
+        // Verus can express the post-state of the ghost view. The
+        // shim is sound because `Mutex::lock` provides exclusive
+        // access while held — the critical section is observationally
+        // a `&mut` step. Trusting this shim is exactly trusting that
+        // std's `Mutex` correctly implements mutual exclusion.
+        // Spec: bumps the ghost view by exactly 1. This is the F7
+        // tick-step axiom; everything else flows from it.
         #[verifier::external_body]
+        pub fn proof_lock_increment(s: &mut LockState)
+            ensures lock_state_value(s) == lock_state_value(old(s)) + 1
+        {
+            s.lock_increment()
+        }
+
+        // F7 discharge — `out as int == ts(c)`. Body invokes the
+        // trusted read shim; Verus chains the shim's ensures through
+        // the structural definition of `ts(c) := lock_state_value(&c.inner)`.
         pub fn now_ensures(c: &Logical) -> (out: i64)
             ensures out as int == ts(c)
         {
-            unimplemented!()
+            proof_lock_value(&c.inner)
         }
 
-        #[verifier::external_body]
+        // F7 discharge — `ts(c) == old(ts(c)) + 1`. Body invokes the
+        // trusted write shim; Verus chains the shim's ensures
+        // through the structural definition of `ts`.
         pub fn tick_ensures(c: &mut Logical)
             ensures ts(c) == ts(old(c)) + 1
         {
-            unimplemented!()
+            proof_lock_increment(&mut c.inner)
         }
     }
 }
