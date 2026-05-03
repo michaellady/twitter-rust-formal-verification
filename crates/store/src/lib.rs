@@ -55,9 +55,16 @@
 //!     result is Err ==> users_keys(s) == users_keys(old(s)),
 //! ```
 //!
-//! The other six store methods (`has_user`, `put_follow`, `delete_follow`,
+//! Sub-PR 2 adds the read-only `has_user` discharge: a thin verified
+//! wrapper `has_user_ensures(s: &MemStore, handle: &String) -> bool`
+//! whose ensures pins the returned bool to `users_keys(s).contains(handle@)`
+//! by reusing the existing `proof_users_contains` shim (no new ghost
+//! views, no new shims — the read-side shim was already general enough
+//! because `put_user`'s membership check also takes `&MemStore`).
+//!
+//! The other five store methods (`put_follow`, `delete_follow`,
 //! `put_tweet`, `follow_set`, `home_timeline`) remain in the trusted
-//! skeleton and are scheduled for the follow-up sub-PRs (S3P4-2..7).
+//! skeleton and are scheduled for the follow-up sub-PRs (S3P4-3..7).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
@@ -277,7 +284,11 @@ impl Default for MemStore {
 //     ensures  users_keys(old(s)).contains(u.handle@) ==> result is Err
 //              !users_keys(old(s)).contains(u.handle@) ==> result is Ok
 //              result is Ok ==> users_keys(s) == users_keys(old(s)).insert(u.handle@)
-//     ^^^ DISCHARGED in Stream 3 Phase 4 sub-PR 1 (this PR).
+//     ^^^ DISCHARGED in Stream 3 Phase 4 sub-PR 1.
+//
+//   has_user:
+//     ensures  result == users_keys(s).contains(handle@)
+//     ^^^ DISCHARGED in Stream 3 Phase 4 sub-PR 2 (this PR).
 //
 //   put_follow:
 //     requires users.contains(f.from) && users.contains(f.to) && f.from != f.to
@@ -385,6 +396,21 @@ mod verus_proof {
             }
             proof_users_insert(s, u);
             Ok(())
+        }
+
+        // Read-only `MemStore::has_user` discharge (Stream 3 Phase 4 sub-PR 2).
+        // Pure verified wrapper: takes `&MemStore` (no `&mut` needed —
+        // `has_user` is a read), reuses the existing `proof_users_contains`
+        // shim whose post-condition pins the returned `bool` to
+        // `users_keys(s).contains(handle@)`. No new ghost views and no new
+        // shims — `proof_users_contains` was already general enough because
+        // `put_user`'s read-step takes `&MemStore` too. This is exactly the
+        // body of the production `MemStore::has_user` (lock-acquire +
+        // `HashMap::contains_key`), expressed against the trusted shim.
+        pub fn has_user_ensures(s: &MemStore, handle: &String) -> (result: bool)
+            ensures result == users_keys(s).contains(handle@),
+        {
+            proof_users_contains(s, handle)
         }
     }
 }
