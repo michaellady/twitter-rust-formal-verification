@@ -111,7 +111,7 @@ impl Service {
 
     /// Records a follow edge. F4 rejects self-follow; F9 rejects unknown users.
     pub fn follow(&self, from: &str, to: &str) -> Result<(), ServiceError> {
-        let f = Follow::new(from, to)?;
+        let f = Follow::new(from.to_string(), to.to_string())?;
         Ok(self.st.put_follow(f)?)
     }
 

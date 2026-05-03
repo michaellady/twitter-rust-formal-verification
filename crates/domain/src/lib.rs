@@ -7,45 +7,87 @@
 //!   exist anywhere in the program.
 //!
 //! # Verus annotations
-//! `Follow::new`'s contract under Verus is:
 //!
-//!   ensures
-//!       result.is_ok() ==> result.unwrap().from != result.unwrap().to,
-//!       (from == to) ==> result.is_err()
+//! Stream 3 Phase 3 — F4 is **discharged**, not skeleton-trusted.
 //!
-//! This is what F4 requires; everything downstream takes it as a precondition.
+//! The `Follow`, `User`, `Tweet`, and `DomainError` types and `Follow::new`
+//! are all defined inside a top-level `verus! { ... }` block so Verus can
+//! see the field projections and discharge the postconditions against the
+//! function body. Under `--cfg verus_keep_ghost` (set by `cargo verus
+//! verify`), Verus checks that the body satisfies the `ensures` clauses.
+//! Under stable rustc, the `verus!` macro erases the ghost annotations
+//! and the function compiles as plain Rust.
+//!
+//! Discharged contract:
+//!
+//! ```text
+//! ensures
+//!     from@ == to@ ==> result is Err,
+//!     from@ != to@ ==> result is Ok,
+//!     result is Ok ==> result->Ok_0.from@ == from@,
+//!     result is Ok ==> result->Ok_0.to@   == to@,
+//!     result is Ok ==> result->Ok_0.from@ != result->Ok_0.to@,
+//! ```
+//!
+//! `String` equality goes through `vstd`'s built-in `View` for `String`
+//! (`s@ -> Seq<char>`) plus the `assume_specification` for
+//! `<String as PartialEq>::eq` (which says `(a == b) == (a@ == b@)`).
+//! No new `external_type_specification` rows are needed — `vstd` already
+//! ships `ExString` (`std_specs/string.rs`) and `Result` is handled in
+//! `std_specs/result.rs`. Net TCB delta: removes the `verus_proof`
+//! "trusted skeleton" row; adds zero rows.
 
 use std::fmt;
+use vstd::prelude::*;
 
-/// A registered user.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct User {
-    pub id: i64,
-    pub handle: String,
-}
+verus! {
+    /// A registered user.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct User {
+        pub id: i64,
+        pub handle: String,
+    }
 
-/// A posted tweet. Created via the service layer; this type is plain data.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Tweet {
-    pub id: i64,
-    pub author: String,
-    pub text: String,
-    pub created_at: i64,
-}
+    /// A posted tweet. Created via the service layer; this type is plain data.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Tweet {
+        pub id: i64,
+        pub author: String,
+        pub text: String,
+        pub created_at: i64,
+    }
 
-/// A follow edge from `from` to `to`. Constructed through `Follow::new`,
-/// which is the only public way to make one — that's where F4 lives.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Follow {
-    pub from: String,
-    pub to: String,
-}
+    /// A follow edge from `from` to `to`. Constructed through `Follow::new`,
+    /// which is the only public way to make one — that's where F4 lives.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Follow {
+        pub from: String,
+        pub to: String,
+    }
 
-/// Errors raised by domain constructors.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DomainError {
-    /// F4: `from == to` is rejected at construction time.
-    SelfFollow,
+    /// Errors raised by domain constructors.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum DomainError {
+        /// F4: `from == to` is rejected at construction time.
+        SelfFollow,
+    }
+
+    impl Follow {
+        /// Builds a `Follow`, rejecting self-follow (F4).
+        pub fn new(from: String, to: String) -> (result: Result<Follow, DomainError>)
+            ensures
+                from@ == to@ ==> result is Err,
+                from@ != to@ ==> result is Ok,
+                result is Ok ==> result->Ok_0.from@ == from@,
+                result is Ok ==> result->Ok_0.to@   == to@,
+                result is Ok ==> result->Ok_0.from@ != result->Ok_0.to@,
+        {
+            if from == to {
+                return Err(DomainError::SelfFollow);
+            }
+            Ok(Follow { from, to })
+        }
+    }
 }
 
 impl fmt::Display for DomainError {
@@ -58,47 +100,20 @@ impl fmt::Display for DomainError {
 
 impl std::error::Error for DomainError {}
 
-impl Follow {
-    /// Builds a `Follow`, rejecting self-follow (F4).
-    pub fn new(from: impl Into<String>, to: impl Into<String>) -> Result<Self, DomainError> {
-        let from = from.into();
-        let to = to.into();
-        if from == to {
-            return Err(DomainError::SelfFollow);
-        }
-        Ok(Self { from, to })
-    }
-}
-
-// =============================================================================
-// Verus proof obligations (F4).
-// =============================================================================
-#[cfg(verus_only)]
-mod verus_proof {
-    use super::*;
-    use vstd::prelude::*;
-    verus! {
-        // Trusted skeleton: F4 obligation is documented above; full proof
-        // requires Verus String/Result specifications that are out of scope
-        // for this PR. The body is dispatched via the actual Follow::new
-        // implementation in this crate.
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn follow_rejects_self() {
-        let err = Follow::new("alice", "alice").unwrap_err();
+        let err = Follow::new("alice".to_string(), "alice".to_string()).unwrap_err();
         assert_eq!(err, DomainError::SelfFollow);
         assert_eq!(err.to_string(), "self_follow_forbidden");
     }
 
     #[test]
     fn follow_accepts_different() {
-        let f = Follow::new("alice", "bob").unwrap();
+        let f = Follow::new("alice".to_string(), "bob".to_string()).unwrap();
         assert_eq!(f.from, "alice");
         assert_eq!(f.to, "bob");
     }
@@ -137,7 +152,7 @@ mod tests {
 
     #[test]
     fn follow_clone_eq() {
-        let f = Follow::new("a", "b").unwrap();
+        let f = Follow::new("a".to_string(), "b".to_string()).unwrap();
         assert_eq!(f.clone(), f);
     }
 }
