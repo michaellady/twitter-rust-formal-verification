@@ -13,6 +13,7 @@ use std::sync::Arc;
 use axum::{
     extract::{Query, State},
     http::StatusCode,
+    middleware,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -20,6 +21,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use service::{Service, ServiceError};
+
+use crate::metrics;
 
 /// Construct the axum router around `svc`.
 pub fn router(svc: Arc<Service>) -> Router {
@@ -29,8 +32,11 @@ pub fn router(svc: Arc<Service>) -> Router {
         .route("/tweets", post(post_tweet))
         .route("/timeline", get(timeline))
         .route("/healthz", get(healthz))
-        .route("/version", get(version));
-    crate::ui::mount(api).with_state(svc)
+        .route("/version", get(version))
+        .route("/metrics", get(metrics::render));
+    crate::ui::mount(api)
+        .layer(middleware::from_fn(metrics::track))
+        .with_state(svc)
 }
 
 // -----------------------------------------------------------------------------
@@ -134,6 +140,7 @@ async fn create_user(
             .into_response(),
         Err(e) => {
             let (status, code) = map_err(e);
+            metrics::note_violation(code, "/users");
             err(status, code).into_response()
         }
     }
@@ -161,6 +168,7 @@ async fn follow(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             let (status, code) = map_err(e);
+            metrics::note_violation(code, "/follow");
             err(status, code).into_response()
         }
     }
@@ -178,6 +186,7 @@ async fn unfollow(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             let (status, code) = map_err(e);
+            metrics::note_violation(code, "/follow");
             err(status, code).into_response()
         }
     }
@@ -222,6 +231,7 @@ async fn post_tweet(
             .into_response(),
         Err(e) => {
             let (status, code) = map_err(e);
+            metrics::note_violation(code, "/tweets");
             err(status, code).into_response()
         }
     }
