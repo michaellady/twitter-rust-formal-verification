@@ -21,6 +21,8 @@ Every Tier-4 PR MUST append at least one line under the appropriate section. The
 
 ### Fixed
 
+- Quote two workflow step names in `.github/workflows/verify.yml` (`Build and push (pass 1: …)` and `Re-tag with version baked in (pass 2)`) so the YAML parser doesn't trip on `+` in the unquoted scalar. The Phase 1 squash-merge raced ahead of the original fix commit and landed the broken YAML on main; this patches it.
+
 ### Trust-Boundary
 
 - Trust surface inventoried; baseline = 5 external_body + 2 closed spec opaque + 2 external_type_specification + 2 Cargo-metadata + 4 IO/CI items. Future Tier-4 PRs adjust this delta.
