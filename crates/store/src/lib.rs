@@ -314,6 +314,10 @@ mod verus_proof {
         #[verifier::external_body]
         pub struct ExMemStore(crate::MemStore);
 
+        #[verifier::external_type_specification]
+        #[verifier::external_body]
+        pub struct ExStoreError(crate::StoreError);
+
         // Ghost view of the set of currently-registered user handles
         // (each handle viewed as the `Seq<char>` projection of its
         // String key). Body opaque: Verus has no concrete view of the
