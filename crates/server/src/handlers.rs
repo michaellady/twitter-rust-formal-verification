@@ -23,14 +23,14 @@ use service::{Service, ServiceError};
 
 /// Construct the axum router around `svc`.
 pub fn router(svc: Arc<Service>) -> Router {
-    Router::new()
+    let api = Router::new()
         .route("/users", post(create_user))
         .route("/follow", post(follow).delete(unfollow))
         .route("/tweets", post(post_tweet))
         .route("/timeline", get(timeline))
         .route("/healthz", get(healthz))
-        .route("/version", get(version))
-        .with_state(svc)
+        .route("/version", get(version));
+    crate::ui::mount(api).with_state(svc)
 }
 
 // -----------------------------------------------------------------------------
