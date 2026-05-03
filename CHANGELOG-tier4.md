@@ -22,6 +22,7 @@ Every Tier-4 PR MUST append at least one line under the appropriate section. The
 ### Fixed
 
 - Quote two workflow step names in `.github/workflows/verify.yml` (`Build and push (pass 1: …)` and `Re-tag with version baked in (pass 2)`) so the YAML parser doesn't trip on `+` in the unquoted scalar. The Phase 1 squash-merge raced ahead of the original fix commit and landed the broken YAML on main; this patches it.
+- Dockerfile: distroless final stage has no `/bin/sh`, so `RUN printf …` to bake `/etc/version.json` failed at image build. Move the printf into the builder stage and COPY the resulting `version.json` into the distroless final stage. Image-digest provenance still works the same way at runtime.
 
 ### Trust-Boundary
 
