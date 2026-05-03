@@ -94,6 +94,20 @@ impl Service {
         self.clk.clone()
     }
 
+    /// Advances the inner clock by one tick. Pure delegation to
+    /// `Clock::tick`; the underlying F7 (timestamps non-decreasing,
+    /// `tick` advances by exactly 1) is discharged in `crates/clock`
+    /// (`tick_ensures`, Stream 3 Phase 1b).
+    ///
+    /// Stream 3 Phase 5 added this convenience method so the service
+    /// surface has an explicit "advance time" entry point that mirrors
+    /// the discharged clock primitive — previously callers reached
+    /// through `service.clock().tick()`. Behavior is unchanged; this is
+    /// shorthand for the same `Arc<dyn Clock>::tick` call.
+    pub fn tick(&self) {
+        self.clk.tick();
+    }
+
     /// Registers a new user; rejects empty handles.
     pub fn create_user(&self, handle: &str) -> Result<User, ServiceError> {
         if handle.is_empty() {
@@ -195,16 +209,54 @@ impl Default for Service {
 }
 
 // =============================================================================
-// Verus proof obligations (F1, F2, F4 dispatched here; F6/F8 by composition).
+// Verus proof obligations (F1, F2, F4 dispatched here; F6/F7/F8 by composition).
 // =============================================================================
+//
+// # Stream 3 Phase 5 status — `Service::tick` composition (TCB-narrowing only)
+//
+// `Service::tick` is the smallest service-side composition: it is pure
+// delegation to `Clock::tick`, whose F7 obligations
+// (`now_ensures` / `tick_ensures`) are already discharged in `crates/clock`
+// (Stream 3 Phase 1b — see `clock::verus_proof`).
+//
+// Phase 5 ships `Service::tick` as a thin wrapper but does **not** ship a
+// verified `tick_ensures(s: &mut Service)` lemma in this block. The
+// structural blockers:
+//
+//   1. `Service.clk` is `Arc<dyn Clock>` — a trait object behind an `Arc`.
+//      Verus has no model of `Arc` or `dyn Trait` dispatch in
+//      vstd 0.0.0-2026-04-20-1748 — chaining `clock::tick_ensures`
+//      through the trait-object call would require either a vstd `Arc`
+//      model or a custom trait-resolution shim, both out of scope here.
+//   2. `clock::verus_proof` is a private module; its `ts(c)` ghost view
+//      and `tick_ensures` lemma are not currently re-exported across
+//      crate boundaries. Cross-crate `verus_proof` reuse is novel
+//      infrastructure — no other crate in the workspace does it today,
+//      and bootstrapping it for one delegation method is much larger
+//      than the per-method sub-PR cadence the brief contemplates.
+//
+// Phase 5's deliverable is therefore TCB-narrowing only: the public
+// `Service::tick` method exists (so future verified composition has a
+// stable target), and the trusted-skeleton row in `TCB.md` is rewritten
+// to call out the two blockers above explicitly. When `vstd` ships an
+// `Arc<dyn Trait>` model (or when `Service` swaps `Arc<dyn Clock>` for a
+// concrete `Arc<Logical>` field — a public-API change punted to a later
+// sub-PR), this lemma can be discharged by chaining `clock::tick_ensures`
+// through it.
+//
+// `post_tweet`, `follow`, `home_timeline` obligations remain documented
+// above. Their full discharge requires the same trait-object-modeling work
+// plus lifting Mutex/HashMap/Vec through vstd shims, scheduled for sub-PRs
+// after the corresponding store methods land.
 #[cfg(verus_only)]
 mod verus_proof {
     use super::*;
     use vstd::prelude::*;
     verus! {
-        // post_tweet, follow, home_timeline obligations documented above.
-        // Trusted skeleton: full proofs require lifting Mutex/HashMap/Vec
-        // through vstd shims, which is out of scope for this PR.
+        // Trusted skeleton: see module-level commentary above for the
+        // Phase 5 `Service::tick` composition status (TCB-narrowing
+        // only; verified delegation blocked on `Arc<dyn Clock>`
+        // modeling + cross-crate `verus_proof` reuse infrastructure).
     }
 }
 
@@ -340,6 +392,21 @@ mod tests {
         let h = s.clock();
         h.tick();
         assert_eq!(clk.now(), 1);
+    }
+
+    #[test]
+    fn service_tick_advances_inner_clock() {
+        // Stream 3 Phase 5: `Service::tick` is pure delegation to the
+        // shared clock handle. F7 (advance-by-1, non-decreasing) is
+        // discharged in `clock::tick_ensures`.
+        let clk = Arc::new(Logical::new());
+        let s = Service::new_with_clock(clk.clone());
+        assert_eq!(clk.now(), 0);
+        s.tick();
+        assert_eq!(clk.now(), 1);
+        s.tick();
+        s.tick();
+        assert_eq!(clk.now(), 3);
     }
 
     #[test]
