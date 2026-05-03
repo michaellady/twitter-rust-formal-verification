@@ -74,6 +74,14 @@ impl LockState {
         let mut g = self.inner.lock().expect("clock mutex poisoned");
         *g += 1;
     }
+
+    /// Atomic set of the protected value. **Trusted (TCB).** Used by
+    /// the Stream 2 snapshot-load admin path; bypasses F7 if `value`
+    /// goes backwards.
+    pub(crate) fn lock_set(&self, value: i64) {
+        let mut g = self.inner.lock().expect("clock mutex poisoned");
+        *g = value;
+    }
 }
 
 /// Trait abstracting the logical clock so callers (service) can be tested
@@ -83,6 +91,23 @@ pub trait Clock: Send + Sync {
     fn now(&self) -> i64;
     /// Advances the clock by 1 tick.
     fn tick(&self);
+    /// Forces the clock to read `value` on the next `now()` call.
+    ///
+    /// Default impl: if `value > now()`, calls `tick()` `(value - now())`
+    /// times. If `value <= now()`, this is a no-op (F7 forbids going
+    /// backwards). Slow but correct: a stub clock built on top of `tick`
+    /// requires nothing more.
+    ///
+    /// Concrete impls (`Logical`) may override this with a single-mutex-op
+    /// implementation; that override is **trusted** because it can violate
+    /// F7's monotonicity if `value < now()` is requested.
+    fn set_now(&self, value: i64) {
+        let mut cur = self.now();
+        while cur < value {
+            self.tick();
+            cur += 1;
+        }
+    }
 }
 
 /// `Logical` is the single concrete clock used by the verified core. It
@@ -124,6 +149,14 @@ impl Clock for Logical {
 
     fn tick(&self) {
         self.inner.lock_increment();
+    }
+
+    /// **Trusted (TCB).** Single-mutex-op override of the trait default.
+    /// Bypasses F7's monotonic-non-decreasing invariant if `value < now()`
+    /// is requested — used only by the Stream 2 snapshot-load admin path,
+    /// where the producer's snapshot is the source of truth.
+    fn set_now(&self, value: i64) {
+        self.inner.lock_set(value);
     }
 }
 
@@ -288,5 +321,55 @@ mod tests {
         c.tick();
         assert_eq!(c.inner.lock_value(), c.now());
         assert_eq!(c.inner.lock_value(), 8);
+    }
+
+    #[test]
+    fn logical_set_now_one_op() {
+        // Trusted override: jumps directly.
+        let c = Logical::new();
+        c.set_now(1000);
+        assert_eq!(c.now(), 1000);
+        // Trusted: can also rewind on Logical (the snapshot-load case).
+        c.set_now(50);
+        assert_eq!(c.now(), 50);
+    }
+
+    /// Stub clock that delegates to the trait's default `set_now` impl.
+    /// Verifies the slow-but-correct fallback works for any `Clock`.
+    struct CountingTickClock {
+        inner: Mutex<(i64, usize)>,
+    }
+    impl Clock for CountingTickClock {
+        fn now(&self) -> i64 {
+            self.inner.lock().unwrap().0
+        }
+        fn tick(&self) {
+            let mut g = self.inner.lock().unwrap();
+            g.0 += 1;
+            g.1 += 1;
+        }
+        // intentionally do NOT override set_now
+    }
+
+    #[test]
+    fn default_set_now_uses_tick_repeatedly() {
+        let c = CountingTickClock { inner: Mutex::new((0, 0)) };
+        c.set_now(5);
+        assert_eq!(c.now(), 5);
+        assert_eq!(c.inner.lock().unwrap().1, 5);
+    }
+
+    #[test]
+    fn default_set_now_is_no_op_when_value_lte_now() {
+        let c = CountingTickClock { inner: Mutex::new((0, 0)) };
+        c.tick();
+        c.tick();
+        let pre_ticks = c.inner.lock().unwrap().1;
+        c.set_now(1); // value < now
+        assert_eq!(c.now(), 2);
+        assert_eq!(c.inner.lock().unwrap().1, pre_ticks);
+        c.set_now(2); // value == now
+        assert_eq!(c.now(), 2);
+        assert_eq!(c.inner.lock().unwrap().1, pre_ticks);
     }
 }

@@ -34,7 +34,8 @@ pub fn router(svc: Arc<Service>) -> Router {
         .route("/healthz", get(healthz))
         .route("/version", get(version))
         .route("/metrics", get(metrics::render));
-    crate::ui::mount(api)
+    let with_ui = crate::ui::mount(api);
+    crate::admin::mount(with_ui)
         .layer(middleware::from_fn(metrics::track))
         .with_state(svc)
 }

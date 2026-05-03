@@ -17,6 +17,20 @@ async fn main() {
         seed_demo(&svc);
     }
 
+    // Stream 2 Phase 0: announce the admin-token state. The endpoint
+    // handlers re-read ADMIN_TOKEN per request (so secret rotation
+    // applies without a restart in environments where it's set in-place).
+    // Unlike UI cookies, there is NO per-process random fallback — admin
+    // auth must be explicit.
+    match std::env::var("ADMIN_TOKEN") {
+        Ok(v) if !v.is_empty() => {
+            eprintln!("admin endpoints enabled (ADMIN_TOKEN set, {} bytes)", v.len());
+        }
+        _ => {
+            eprintln!("WARNING: ADMIN_TOKEN unset — /_admin/* endpoints will return 503 admin_disabled");
+        }
+    }
+
     let app = server::router(svc);
 
     let addr = format!("0.0.0.0:{port}");

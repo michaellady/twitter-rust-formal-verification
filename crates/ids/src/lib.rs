@@ -37,6 +37,25 @@ impl Generator {
         *g += 1;
         *g
     }
+
+    /// Returns the current counter value (the value that was most recently
+    /// returned by `next_id`, or 0 if `next_id` has never been called).
+    ///
+    /// Trusted (TCB): used by Stream 2 snapshot to capture the generator
+    /// state. Does not mutate the counter.
+    pub fn current(&self) -> i64 {
+        let g = self.inner.lock().expect("ids mutex poisoned");
+        *g
+    }
+
+    /// **Trusted (TCB).** Overwrites the counter to `value`. Bypasses F8's
+    /// strict-monotonic-from-1 invariant if abused — use only via the
+    /// snapshot/load admin path or the seed loader. Stream 2 Phase 0
+    /// requires this to materialize a generator state captured on a peer.
+    pub fn set_current(&self, value: i64) {
+        let mut g = self.inner.lock().expect("ids mutex poisoned");
+        *g = value;
+    }
 }
 
 impl Default for Generator {
@@ -134,5 +153,29 @@ mod tests {
     fn default_is_new() {
         let g = Generator::default();
         assert_eq!(g.next_id(), 1);
+    }
+
+    #[test]
+    fn current_starts_at_zero() {
+        let g = Generator::new();
+        assert_eq!(g.current(), 0);
+    }
+
+    #[test]
+    fn current_tracks_next_id() {
+        let g = Generator::new();
+        g.next_id();
+        g.next_id();
+        g.next_id();
+        assert_eq!(g.current(), 3);
+    }
+
+    #[test]
+    fn set_current_overrides_counter() {
+        // Trusted: bypasses F8 strict-monotonic-from-1.
+        let g = Generator::new();
+        g.set_current(42);
+        assert_eq!(g.current(), 42);
+        assert_eq!(g.next_id(), 43);
     }
 }
