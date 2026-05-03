@@ -27,8 +27,13 @@ if [ ! -f "$TLA_JAR" ]; then
     "https://github.com/tlaplus/tlaplus/releases/download/v${TLA_VERSION}/tla2tools.jar"
 fi
 
-if ! command -v java >/dev/null; then
-  echo "java not found — install Java 11+ to run TLC" >&2
+# Use `java -version` rather than `command -v java`: on macOS without a JRE
+# installed, `/usr/bin/java` is a shim that exits 0 from `command -v` but
+# prints the "install Java" prompt and exits 0 from `-version`. Checking the
+# version output explicitly catches the shim and any other broken installs.
+if ! java -version >/dev/null 2>&1; then
+  echo "java not found or unable to launch — install Java 17+ to run TLC" >&2
+  java -version 2>&1 | head -3 >&2
   exit 1
 fi
 

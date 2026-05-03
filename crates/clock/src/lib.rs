@@ -18,6 +18,10 @@
 
 use std::sync::Mutex;
 
+#[cfg(verus_only)]
+#[allow(unused_imports)]
+use vstd::prelude::*;
+
 /// Trait abstracting the logical clock so callers (service) can be tested
 /// against a deterministic stub.
 pub trait Clock: Send + Sync {
@@ -96,19 +100,34 @@ impl Clock for Logical {
 //
 // The "external_body" attribute is required because `Mutex::lock` is not
 // Verus-verifiable; we trust the std library's exclusivity guarantee.
-#[cfg(verus)]
+#[cfg(verus_only)]
 mod verus_proof {
     use super::*;
+    use vstd::prelude::*;
     verus! {
-        spec fn ts(c: &Logical) -> int { c.inner.lock_value() as int }
+        #[verifier::external_type_specification]
+        #[verifier::external_body]
+        pub struct ExLogical(crate::Logical);
+
+        // Opaque ghost view of the clock's current logical timestamp.
+        // The body is unobservable to the verifier (`external_body`); we
+        // treat it as a trusted abstraction over `Mutex<i64>` exclusivity.
+        #[verifier::external_body]
+        pub closed spec fn ts(c: &Logical) -> int { unimplemented!() }
 
         #[verifier::external_body]
         pub fn now_ensures(c: &Logical) -> (out: i64)
-            ensures out as int == ts(c);
+            ensures out as int == ts(c)
+        {
+            unimplemented!()
+        }
 
         #[verifier::external_body]
-        pub fn tick_ensures(c: &Logical)
-            ensures ts(c) == old(ts(c)) + 1;
+        pub fn tick_ensures(c: &mut Logical)
+            ensures ts(c) == ts(old(c)) + 1
+        {
+            unimplemented!()
+        }
     }
 }
 

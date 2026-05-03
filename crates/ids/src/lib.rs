@@ -48,18 +48,27 @@ impl Default for Generator {
 // =============================================================================
 // Verus proof obligations (F8).
 // =============================================================================
-#[cfg(verus)]
+#[cfg(verus_only)]
 mod verus_proof {
     use super::*;
+    use vstd::prelude::*;
     verus! {
-        spec fn count(g: &Generator) -> int { g.inner.lock_value() as int }
+        #[verifier::external_type_specification]
+        #[verifier::external_body]
+        pub struct ExGenerator(crate::Generator);
 
         #[verifier::external_body]
-        pub fn next_id_ensures(g: &Generator) -> (out: i64)
+        pub closed spec fn count(g: &Generator) -> int { unimplemented!() }
+
+        #[verifier::external_body]
+        pub fn next_id_ensures(g: &mut Generator) -> (out: i64)
             ensures
                 out as int == count(g),
-                count(g) == old(count(g)) + 1,
-                out >= 1;
+                count(g) == count(old(g)) + 1,
+                out >= 1
+        {
+            unimplemented!()
+        }
     }
 }
 

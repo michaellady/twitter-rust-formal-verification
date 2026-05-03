@@ -32,9 +32,10 @@ ids = { path = "crates/ids" }
 domain = { path = "crates/domain" }
 store = { path = "crates/store" }
 service = { path = "crates/service" }
+vstd = "=0.0.0-2026-04-20-1748"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus)", "cfg(verus_only)"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
