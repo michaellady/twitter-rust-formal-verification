@@ -368,7 +368,10 @@ mod verus_proof {
             let u = User { id: s.user_ids.next_id(), handle: handle.clone() };
             match s.st.put_user(u.clone()) {
                 Ok(()) => Ok(u),
-                Err(e) => Err(ServiceError::from(e)),
+                Err(e) => Err(match e {
+                    StoreError::UnknownUser => ServiceError::UnknownUser,
+                    StoreError::DuplicateUser => ServiceError::DuplicateUser,
+                }),
             }
         }
 
@@ -504,7 +507,10 @@ mod verus_proof {
         {
             match s.st.put_follow(f) {
                 Ok(()) => Ok(()),
-                Err(e) => Err(ServiceError::from(e)),
+                Err(e) => Err(match e {
+                    StoreError::UnknownUser => ServiceError::UnknownUser,
+                    StoreError::DuplicateUser => ServiceError::DuplicateUser,
+                }),
             }
         }
 
@@ -556,7 +562,9 @@ mod verus_proof {
         {
             let f = match Follow::new(from, to) {
                 Ok(f) => f,
-                Err(e) => return Err(ServiceError::from(e)),
+                Err(e) => return Err(match e {
+                    DomainError::SelfFollow => ServiceError::SelfFollow,
+                }),
             };
             proof_service_put_follow(s, f)
         }
