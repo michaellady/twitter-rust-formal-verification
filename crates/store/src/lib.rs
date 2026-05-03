@@ -190,9 +190,10 @@ impl Default for MemStore {
 //                  result[i].created_at > result[j].created_at
 //               || (result[i].created_at == result[j].created_at
 //                  && result[i].id > result[j].id)                     // F2
-#[cfg(verus)]
+#[cfg(verus_only)]
 mod verus_proof {
     use super::*;
+    use vstd::prelude::*;
     verus! {
         // Obligations stated above, dispatched via #[verifier::external_body]
         // wrappers because Mutex/HashMap require trusted shims in vstd.

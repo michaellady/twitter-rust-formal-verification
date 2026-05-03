@@ -8,5 +8,11 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[dependencies]
+vstd = { workspace = true }
+
 [lints]
 workspace = true
+
+[package.metadata.verus]
+verify = true

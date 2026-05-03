@@ -16,7 +16,11 @@ jobs:
   verus:
     name: verify / verus
     runs-on: ubuntu-latest
-    continue-on-error: true   # Tier 3 (O10) will remove this.
+    # Tier 3 (O10): Verus runs via `cargo verus verify --workspace`, which
+    # honors per-crate `[package.metadata.verus] verify = true` and exits
+    # non-zero on any verification error. The previous per-file
+    # `verus --crate-type=lib …` invocation could not resolve cross-crate
+    # imports and was masked by `|| true`; that path is removed.
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,7 +71,11 @@ jobs:
           path: ~/.verus
           key: verus-${{ env.VERUS_VERSION }}-${{ runner.os }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Verus is pinned to a specific Rust toolchain (currently 1.95.0). Using
+      # `dtolnay/rust-toolchain@stable` is wrong: stable may drift past the
+      # version Verus was built against, causing `verus: required rust
+      # toolchain X not found`. Pin to the exact version Verus expects.
+      - uses: dtolnay/rust-toolchain@1.95.0
         if: steps.detect.outputs.skip == 'false'
 
       - name: Install Verus prebuilt (skip if cache hit)
@@ -80,37 +88,30 @@ jobs:
           encoded_tag="${VERUS_VERSION//\//%2F}"
           asset="verus-${asset_version}-x86-linux.zip"
           url="https://github.com/verus-lang/verus/releases/download/${encoded_tag}/${asset}"
-          if ! curl -fsSL -o /tmp/verus.zip "$url"; then
-            echo "Verus release not found at $url — leaving unpopulated"
-            rm -rf "$HOME/.verus"
-            exit 0
-          fi
+          curl -fsSL -o /tmp/verus.zip "$url"
           unzip -q /tmp/verus.zip -d "$HOME/.verus"
 
-      - name: Add Verus to PATH
+      - name: Add Verus + cargo-verus to PATH
         if: steps.detect.outputs.skip == 'false'
         shell: bash
         run: |
+          set -euo pipefail
           verus_bin=$(find "$HOME/.verus" -type f -name verus -perm -111 -print -quit 2>/dev/null || true)
-          if [ -n "$verus_bin" ]; then
-            dirname "$verus_bin" >> "$GITHUB_PATH"
-          else
-            echo "verus binary not found under $HOME/.verus"
+          if [ -z "$verus_bin" ]; then
+            echo "verus binary not found under $HOME/.verus — install failed" >&2
+            ls -lR "$HOME/.verus" >&2
+            exit 1
           fi
+          dirname "$verus_bin" >> "$GITHUB_PATH"
 
-      - name: Run Verus on each verified crate
+      - name: Run Verus on workspace (cargo verus verify)
         if: steps.detect.outputs.skip == 'false'
         shell: bash
         run: |
-          set -euxo pipefail
-          if ! command -v verus >/dev/null; then
-            echo "verus not on PATH — skipping verification (annotations remain compile-time noop)"
-            exit 0
-          fi
-          for c in clock ids domain store service; do
-            echo "=== Verus on $c ==="
-            verus --crate-type=lib "crates/$c/src/lib.rs" || true
-          done
+          set -euo pipefail
+          # Honors per-crate [package.metadata.verus] verify = true.
+          # Exits non-zero on any verification error — no || true.
+          cargo verus verify --workspace
 
       - name: Skipped (docs-only)
         if: steps.detect.outputs.skip == 'true'
@@ -119,7 +120,11 @@ jobs:
   tlc:
     name: verify / tlc
     runs-on: ubuntu-latest
-    continue-on-error: true   # Tier 3 (O10) will remove this.
+    # Tier 3 (O10): TLC is reliable on the rightsized bound (141M states /
+    # 9M distinct, ~4m21s on ubuntu-latest). Failures are real spec
+    # violations and must fail the gate. Smoke recipe: introduce a
+    # deliberately-false invariant in twitter-pr.cfg on a throwaway branch
+    # and confirm this job goes red.
     steps:
       - uses: actions/checkout@v4
         with:

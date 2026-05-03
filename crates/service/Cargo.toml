@@ -13,6 +13,10 @@ clock = { workspace = true }
 ids = { workspace = true }
 domain = { workspace = true }
 store = { workspace = true }
+vstd = { workspace = true }
 
 [lints]
 workspace = true
+
+[package.metadata.verus]
+verify = true
