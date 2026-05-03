@@ -19,7 +19,6 @@ The Tier-3 baseline below was inventoried during the Tier-3 verifier-strictness 
 | `crates/ids/src/lib.rs` | `next_id_ensures` | wraps `Generator::next` (Mutex<i64>) | unit tests + TLC F8 invariant |
 | `crates/ids/src/lib.rs` | `count(g)` (closed spec, opaque) | same as `ts` | derived |
 | `crates/ids/src/lib.rs` | `ExGenerator` external_type_specification | `Generator` has private `inner` field | tests |
-| `crates/domain/src/lib.rs` | `verus_proof` (trusted skeleton) | F4 obligation documented in comments; full proof requires Verus `String`/`Result` specs out of scope | unit tests |
 | `crates/store/src/lib.rs` | `verus_proof` (trusted skeleton) | F3/F6/F9 documented; full proofs require lifting `Mutex`/`HashMap` to vstd shims out of scope | unit + integration + conformance tests |
 | `crates/service/src/lib.rs` | `verus_proof` (trusted skeleton) | composition obligations (F1+F6, F2 sort) documented; out of scope | unit + integration + conformance tests |
 

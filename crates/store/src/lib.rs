@@ -294,7 +294,7 @@ mod tests {
     fn put_follow_rejects_unknown_from() {
         let s = MemStore::new();
         s.put_user(bob()).unwrap();
-        let f = Follow::new("alice", "bob").unwrap();
+        let f = Follow::new("alice".to_string(), "bob".to_string()).unwrap();
         assert_eq!(s.put_follow(f).unwrap_err(), StoreError::UnknownUser);
     }
 
@@ -302,7 +302,7 @@ mod tests {
     fn put_follow_rejects_unknown_to() {
         let s = MemStore::new();
         s.put_user(alice()).unwrap();
-        let f = Follow::new("alice", "bob").unwrap();
+        let f = Follow::new("alice".to_string(), "bob".to_string()).unwrap();
         assert_eq!(s.put_follow(f).unwrap_err(), StoreError::UnknownUser);
     }
 
@@ -311,8 +311,8 @@ mod tests {
         let s = MemStore::new();
         s.put_user(alice()).unwrap();
         s.put_user(bob()).unwrap();
-        s.put_follow(Follow::new("alice", "bob").unwrap()).unwrap();
-        s.put_follow(Follow::new("alice", "bob").unwrap()).unwrap();
+        s.put_follow(Follow::new("alice".to_string(), "bob".to_string()).unwrap()).unwrap();
+        s.put_follow(Follow::new("alice".to_string(), "bob".to_string()).unwrap()).unwrap();
         let set = s.follow_set("alice");
         assert_eq!(set.len(), 1);
         assert!(set.contains("bob"));
@@ -326,7 +326,7 @@ mod tests {
         // No edge yet; delete is a no-op.
         s.delete_follow("alice", "bob");
         assert!(s.follow_set("alice").is_empty());
-        s.put_follow(Follow::new("alice", "bob").unwrap()).unwrap();
+        s.put_follow(Follow::new("alice".to_string(), "bob".to_string()).unwrap()).unwrap();
         s.delete_follow("alice", "bob");
         s.delete_follow("alice", "bob");
         assert!(s.follow_set("alice").is_empty());
@@ -346,7 +346,7 @@ mod tests {
         s.put_user(alice()).unwrap();
         s.put_user(bob()).unwrap();
         s.put_user(carol()).unwrap();
-        s.put_follow(Follow::new("alice", "bob").unwrap()).unwrap();
+        s.put_follow(Follow::new("alice".to_string(), "bob".to_string()).unwrap()).unwrap();
         s.put_tweet(Tweet { id: 1, author: "bob".into(), text: "b".into(), created_at: 1 }).unwrap();
         s.put_tweet(Tweet { id: 2, author: "carol".into(), text: "c".into(), created_at: 2 }).unwrap();
         s.put_tweet(Tweet { id: 3, author: "alice".into(), text: "a".into(), created_at: 3 }).unwrap();
@@ -362,7 +362,7 @@ mod tests {
         let s = MemStore::new();
         s.put_user(bob()).unwrap();
         s.put_user(alice()).unwrap();
-        s.put_follow(Follow::new("alice", "bob").unwrap()).unwrap();
+        s.put_follow(Follow::new("alice".to_string(), "bob".to_string()).unwrap()).unwrap();
         s.put_tweet(Tweet { id: 1, author: "bob".into(), text: "first".into(), created_at: 1 }).unwrap();
         s.put_tweet(Tweet { id: 2, author: "bob".into(), text: "second".into(), created_at: 1 }).unwrap();
         let tl = s.home_timeline("alice", 0);
@@ -423,8 +423,8 @@ mod tests {
         s.put_user(carol()).unwrap();
         s.put_user(alice()).unwrap();
         s.put_user(bob()).unwrap();
-        s.put_follow(Follow::new("alice", "carol").unwrap()).unwrap();
-        s.put_follow(Follow::new("alice", "bob").unwrap()).unwrap();
+        s.put_follow(Follow::new("alice".to_string(), "carol".to_string()).unwrap()).unwrap();
+        s.put_follow(Follow::new("alice".to_string(), "bob".to_string()).unwrap()).unwrap();
         s.put_tweet(Tweet { id: 2, author: "bob".into(), text: "b".into(), created_at: 1 }).unwrap();
         s.put_tweet(Tweet { id: 1, author: "alice".into(), text: "a".into(), created_at: 1 }).unwrap();
         let snap = s.snapshot();
@@ -441,7 +441,7 @@ mod tests {
         let a = MemStore::new();
         a.put_user(alice()).unwrap();
         a.put_user(bob()).unwrap();
-        a.put_follow(Follow::new("alice", "bob").unwrap()).unwrap();
+        a.put_follow(Follow::new("alice".to_string(), "bob".to_string()).unwrap()).unwrap();
         a.put_tweet(Tweet { id: 1, author: "alice".into(), text: "hi".into(), created_at: 5 }).unwrap();
         let snap = a.snapshot();
         let b = MemStore::new();
@@ -501,7 +501,7 @@ mod tests {
             let s = s.clone();
             handles.push(thread::spawn(move || {
                 for _ in 0..200 {
-                    let _ = s.put_follow(Follow::new("alice", "bob").unwrap());
+                    let _ = s.put_follow(Follow::new("alice".to_string(), "bob".to_string()).unwrap());
                 }
             }));
         }
