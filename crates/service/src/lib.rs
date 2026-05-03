@@ -14,7 +14,11 @@ use std::sync::Arc;
 use clock::{Clock, Logical};
 use domain::{DomainError, Follow, Tweet, User};
 use ids::Generator;
-use store::{MemStore, StoreError};
+use store::{MemStore, StoreError, StoreSnapshot};
+
+// Re-export so admin handlers can construct/destructure without depending
+// on `store` directly.
+pub use store::StoreSnapshot as ServiceStoreSnapshot;
 
 /// Errors raised by the service layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +148,44 @@ impl Service {
     pub fn home_timeline(&self, user: &str, limit: usize) -> Vec<Tweet> {
         self.st.home_timeline(user, limit)
     }
+
+    /// Captures the full inner state of the verified core: clock value,
+    /// both id-generator counters, and the store snapshot. Used by the
+    /// Stream 2 admin snapshot endpoint.
+    ///
+    /// Trusted (TCB): exposes internals so they can leave the process.
+    pub fn snapshot_state(&self) -> ServiceState {
+        ServiceState {
+            clock_now: self.clk.now(),
+            id_counter_users: self.user_ids.current(),
+            id_counter_tweets: self.tweet_ids.current(),
+            store: self.st.snapshot(),
+        }
+    }
+
+    /// **Trusted (TCB).** Atomically replaces the inner state. Bypasses
+    /// every verified admission check; the producer of the snapshot is
+    /// the source of truth. Used by the Stream 2 admin load-snapshot
+    /// endpoint.
+    pub fn load_state(&self, s: ServiceState) {
+        self.st.replace(s.store);
+        self.user_ids.set_current(s.id_counter_users);
+        self.tweet_ids.set_current(s.id_counter_tweets);
+        self.clk.set_now(s.clock_now);
+    }
+}
+
+/// Typed inner state of the verified core. The HTTP/admin layer marshals
+/// this to/from JSON; the service layer stays JSON-free.
+///
+/// Trusted (TCB): every field is normally hidden behind a verified
+/// constructor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceState {
+    pub clock_now: i64,
+    pub id_counter_users: i64,
+    pub id_counter_tweets: i64,
+    pub store: StoreSnapshot,
 }
 
 impl Default for Service {
@@ -338,5 +380,73 @@ mod tests {
     fn service_error_std_error() {
         let e = ServiceError::EmptyText;
         let _: &dyn std::error::Error = &e;
+    }
+
+    #[test]
+    fn snapshot_state_captures_full_state() {
+        let clk = Arc::new(Logical::new());
+        let s = Service::new_with_clock(clk.clone());
+        s.create_user("alice").unwrap();
+        s.create_user("bob").unwrap();
+        s.follow("alice", "bob").unwrap();
+        clk.tick();
+        clk.tick();
+        s.post_tweet("alice", "hi").unwrap();
+
+        let snap = s.snapshot_state();
+        assert_eq!(snap.clock_now, 2);
+        assert_eq!(snap.id_counter_users, 2);
+        assert_eq!(snap.id_counter_tweets, 1);
+        assert_eq!(snap.store.users.len(), 2);
+        assert_eq!(snap.store.follows.len(), 1);
+        assert_eq!(snap.store.tweets.len(), 1);
+    }
+
+    #[test]
+    fn load_state_round_trips_through_a_fresh_service() {
+        let clk_a = Arc::new(Logical::new());
+        let a = Service::new_with_clock(clk_a.clone());
+        a.create_user("alice").unwrap();
+        a.create_user("bob").unwrap();
+        a.follow("alice", "bob").unwrap();
+        clk_a.tick();
+        a.post_tweet("alice", "hi").unwrap();
+        a.post_tweet("bob", "yo").unwrap();
+        let snap = a.snapshot_state();
+
+        let clk_b = Arc::new(Logical::new());
+        let b = Service::new_with_clock(clk_b.clone());
+        b.load_state(snap.clone());
+
+        assert_eq!(b.snapshot_state(), snap);
+        // ids continue from where the snapshot left off — F8 still holds
+        // for new IDs after a load.
+        let new_user = b.create_user("carol").unwrap();
+        assert_eq!(new_user.id, 3);
+    }
+
+    #[test]
+    fn load_state_replaces_existing_state() {
+        let s = Service::new();
+        s.create_user("ghost").unwrap();
+        let new_state = ServiceState {
+            clock_now: 7,
+            id_counter_users: 3,
+            id_counter_tweets: 0,
+            store: store::StoreSnapshot {
+                users: vec![
+                    User { id: 1, handle: "alice".into() },
+                    User { id: 2, handle: "bob".into() },
+                    User { id: 3, handle: "carol".into() },
+                ],
+                follows: vec![],
+                tweets: vec![],
+            },
+        };
+        s.load_state(new_state);
+        assert!(!s.has_user("ghost"));
+        assert!(s.has_user("alice"));
+        assert!(s.has_user("bob"));
+        assert!(s.has_user("carol"));
     }
 }

@@ -8,6 +8,7 @@
 //! Correctness of this layer is established by the functional, integration,
 //! conformance, and race tests.
 
+pub mod admin;
 pub mod handlers;
 pub mod metrics;
 pub mod ui;

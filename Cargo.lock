@@ -600,6 +600,7 @@ dependencies = [
  "serde_json",
  "service",
  "sha2",
+ "store",
  "tokio",
  "urlencoding",
 ]

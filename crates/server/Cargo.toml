@@ -19,6 +19,7 @@ path = "src/main.rs"
 service = { workspace = true }
 clock = { workspace = true }
 domain = { workspace = true }
+store = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

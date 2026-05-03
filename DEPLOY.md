@@ -56,7 +56,7 @@ The image-digest is baked into `/etc/version.json` inside each image, so `/versi
 |---|---|---|---|
 | `FLY_API_TOKEN` | GitHub repo secret | deploy workflow auth | quarterly: `flyctl tokens create deploy --expiry 720h`, then update the GitHub secret atomically (gh CLI: `gh secret set FLY_API_TOKEN`) |
 | `GHCR_TOKEN` (auto) | GitHub default `secrets.GITHUB_TOKEN` | image push to GHCR | no rotation; per-job ephemeral |
-| `ADMIN_TOKEN` | Fly secret on the app | snapshot/load-snapshot endpoints (added in Stream 2 Phase 0) | `flyctl secrets set ADMIN_TOKEN=$(openssl rand -hex 32)` simultaneously on both backends so the diffsplitter doesn't lose admin access mid-rotation |
+| `ADMIN_TOKEN` | Fly secret on the app | snapshot/load-snapshot endpoints (Stream 2 Phase 0). If unset, every `/_admin/*` request returns HTTP 503 `{"error":"admin_disabled"}` (no per-process random fallback, unlike `UI_COOKIE_HMAC_KEY`). Auth is constant-time compare of the `X-Admin-Token` request header against this value. | Generate: `openssl rand -hex 32`. Rotate: `flyctl secrets set ADMIN_TOKEN=<new> -a twitter-formal-rust` AND the Go backend in the same minute (the Stream 2 diffsplitter uses one token to talk to both — staggering it loses admin access on whichever app is rotated first). To verify after rotation: `curl -fsS -X POST -H "X-Admin-Token: $TOKEN" https://twitter-formal-rust.fly.dev/_admin/snapshot \| jq .snapshot_version` returns `1`. To revoke immediately: `flyctl secrets unset ADMIN_TOKEN -a twitter-formal-rust` (endpoints flip to 503 after the next deploy/restart). |
 | `UI_COOKIE_HMAC_KEY` | Fly secret on the UI app | demo-login cookie integrity (Stream 1 Phase 2) | with key-versioning (cookies prefixed `kv:1`/`kv:2`); old cookies valid for 7 days after rotation |
 
 | Variable | Where | What for |
@@ -72,7 +72,8 @@ The image-digest is baked into `/etc/version.json` inside each image, so `/versi
 The deploy stack is in TCB. Specifically:
 - `Dockerfile`, `fly.toml`, `.github/workflows/deploy.yml`
 - `GET /healthz`, `GET /version` endpoints
-- Future: `POST /_admin/snapshot`, `POST /_admin/load-snapshot`, `POST /_admin/begin-resync`, `POST /_admin/mark-live` (Stream 2 Phase 0)
+- `POST /_admin/snapshot`, `POST /_admin/load-snapshot` (Stream 2 Phase 0; live as of this PR — entire `crates/server/src/admin.rs` module in TCB)
+- Future: `POST /_admin/begin-resync`, `POST /_admin/mark-live` (Stream 2 Phase 1+)
 - The image-digest verification gate (mismatch fails the deploy)
 
 Inventoried in `TCB.md` whenever an item is added.

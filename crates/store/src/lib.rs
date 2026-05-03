@@ -28,6 +28,21 @@ use std::sync::RwLock;
 
 use domain::{Follow, Tweet, User};
 
+/// Flat snapshot of the verified core's data model. Used by Stream 2's
+/// snapshot/load-snapshot admin endpoints to capture and restore state
+/// across processes.
+///
+/// **Trusted (TCB).** `MemStore::replace` reconstitutes internal indices
+/// from this struct without re-running F3/F6/F9 admission checks; loading
+/// a malformed snapshot can violate verified invariants. Validation lives
+/// in the producer (the peer or the operator hand-editing JSON), not here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoreSnapshot {
+    pub users: Vec<User>,
+    pub follows: Vec<Follow>,
+    pub tweets: Vec<Tweet>,
+}
+
 /// Errors raised by the in-memory store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
@@ -156,6 +171,56 @@ impl MemStore {
             collected.truncate(limit);
         }
         collected
+    }
+
+    /// Captures a flat snapshot of all state. Stable iteration order for
+    /// users (sorted by id), follows (sorted by `(from, to)`), and tweets
+    /// (sorted by id) so two snapshots of the same logical state are
+    /// byte-equal.
+    ///
+    /// Trusted (TCB): part of the Stream 2 snapshot contract.
+    pub fn snapshot(&self) -> StoreSnapshot {
+        let g = self.inner.read().expect("store poisoned");
+        let mut users: Vec<User> = g.users.values().cloned().collect();
+        users.sort_by_key(|u| u.id);
+        let mut follows: Vec<Follow> = Vec::new();
+        for (from, set) in g.follows.iter() {
+            for to in set {
+                follows.push(Follow { from: from.clone(), to: to.clone() });
+            }
+        }
+        follows.sort_by(|a, b| a.from.cmp(&b.from).then_with(|| a.to.cmp(&b.to)));
+        let mut tweets: Vec<Tweet> = Vec::new();
+        for list in g.by_author.values() {
+            tweets.extend(list.iter().cloned());
+        }
+        tweets.sort_by_key(|t| t.id);
+        StoreSnapshot { users, follows, tweets }
+    }
+
+    /// **Trusted (TCB).** Replaces all in-memory state with `s`. Bypasses
+    /// the F3/F6/F9 admission checks (`put_user`, `put_follow`, `put_tweet`):
+    /// callers are trusted to have validated the snapshot upstream. Used
+    /// only by the Stream 2 admin path.
+    pub fn replace(&self, s: StoreSnapshot) {
+        let mut g = self.inner.write().expect("store poisoned");
+        g.users.clear();
+        g.follows.clear();
+        g.by_author.clear();
+        for u in s.users {
+            g.users.insert(u.handle.clone(), u);
+        }
+        for f in s.follows {
+            g.follows.entry(f.from).or_default().insert(f.to);
+        }
+        for t in s.tweets {
+            g.by_author.entry(t.author.clone()).or_default().push(t);
+        }
+        // Per-author lists sorted by tweet id so subsequent snapshots are
+        // deterministic and so timeline iteration order is stable.
+        for list in g.by_author.values_mut() {
+            list.sort_by_key(|t| t.id);
+        }
     }
 }
 
@@ -341,6 +406,84 @@ mod tests {
     fn default_is_new() {
         let s = MemStore::default();
         assert!(!s.has_user("alice"));
+    }
+
+    #[test]
+    fn snapshot_is_empty_initially() {
+        let s = MemStore::new();
+        let snap = s.snapshot();
+        assert!(snap.users.is_empty());
+        assert!(snap.follows.is_empty());
+        assert!(snap.tweets.is_empty());
+    }
+
+    #[test]
+    fn snapshot_captures_state_in_stable_order() {
+        let s = MemStore::new();
+        s.put_user(carol()).unwrap();
+        s.put_user(alice()).unwrap();
+        s.put_user(bob()).unwrap();
+        s.put_follow(Follow::new("alice", "carol").unwrap()).unwrap();
+        s.put_follow(Follow::new("alice", "bob").unwrap()).unwrap();
+        s.put_tweet(Tweet { id: 2, author: "bob".into(), text: "b".into(), created_at: 1 }).unwrap();
+        s.put_tweet(Tweet { id: 1, author: "alice".into(), text: "a".into(), created_at: 1 }).unwrap();
+        let snap = s.snapshot();
+        assert_eq!(snap.users.iter().map(|u| u.id).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(
+            snap.follows.iter().map(|f| (f.from.as_str(), f.to.as_str())).collect::<Vec<_>>(),
+            vec![("alice", "bob"), ("alice", "carol")]
+        );
+        assert_eq!(snap.tweets.iter().map(|t| t.id).collect::<Vec<_>>(), vec![1, 2]);
+    }
+
+    #[test]
+    fn replace_round_trips_snapshot() {
+        let a = MemStore::new();
+        a.put_user(alice()).unwrap();
+        a.put_user(bob()).unwrap();
+        a.put_follow(Follow::new("alice", "bob").unwrap()).unwrap();
+        a.put_tweet(Tweet { id: 1, author: "alice".into(), text: "hi".into(), created_at: 5 }).unwrap();
+        let snap = a.snapshot();
+        let b = MemStore::new();
+        b.replace(snap.clone());
+        assert_eq!(b.snapshot(), snap);
+    }
+
+    #[test]
+    fn replace_clears_prior_state() {
+        let s = MemStore::new();
+        s.put_user(alice()).unwrap();
+        s.put_user(bob()).unwrap();
+        s.put_tweet(Tweet { id: 1, author: "alice".into(), text: "old".into(), created_at: 1 }).unwrap();
+        let new_snap = StoreSnapshot {
+            users: vec![carol()],
+            follows: vec![],
+            tweets: vec![Tweet { id: 9, author: "carol".into(), text: "new".into(), created_at: 9 }],
+        };
+        s.replace(new_snap);
+        assert!(!s.has_user("alice"));
+        assert!(!s.has_user("bob"));
+        assert!(s.has_user("carol"));
+        let tl = s.home_timeline("carol", 0);
+        assert_eq!(tl.len(), 1);
+        assert_eq!(tl[0].id, 9);
+    }
+
+    #[test]
+    fn replace_can_load_state_that_bypasses_admission_checks() {
+        // Trusted: replace doesn't run F6/F9. A snapshot can include a
+        // tweet whose author isn't in the users list. This is the
+        // documented escape hatch — validation lives in the producer.
+        let s = MemStore::new();
+        let snap = StoreSnapshot {
+            users: vec![],
+            follows: vec![],
+            tweets: vec![Tweet { id: 1, author: "ghost".into(), text: "x".into(), created_at: 1 }],
+        };
+        s.replace(snap);
+        // ghost has no entry in users but their tweet is loaded
+        let tl = s.home_timeline("ghost", 0);
+        assert_eq!(tl.len(), 1);
     }
 
     #[test]
