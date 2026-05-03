@@ -315,7 +315,6 @@ mod verus_proof {
         pub struct ExMemStore(crate::MemStore);
 
         #[verifier::external_type_specification]
-        #[verifier::external_body]
         pub struct ExStoreError(crate::StoreError);
 
         // Ghost view of the set of currently-registered user handles
