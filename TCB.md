@@ -16,9 +16,11 @@ The Tier-3 baseline below was inventoried during the Tier-3 verifier-strictness 
 | `crates/clock/src/lib.rs` | `lock_state_value(s)` (closed spec, opaque) | Stream 3 Phase 1a: spec wrapper around `LockState::lock_value`. Body remains trusted until Phase 1b chains it through `vstd::rwlock::RwLock` postconditions. | unit tests asserting `lock_value() == now()` |
 | `crates/clock/src/lib.rs` | `ExLogical` external_type_specification | `Logical` has private `inner` field; structural opaqueness | tests |
 | `crates/clock/src/lib.rs` | `ExLockState` external_type_specification | Stream 3 Phase 1a: `LockState` newtype is opaque to Verus until Phase 1b lifts it to a vstd lock primitive | tests |
-| `crates/ids/src/lib.rs` | `next_id_ensures` | wraps `Generator::next` (Mutex<i64>) | unit tests + TLC F8 invariant |
-| `crates/ids/src/lib.rs` | `count(g)` (closed spec, opaque) | same as `ts` | derived |
-| `crates/ids/src/lib.rs` | `ExGenerator` external_type_specification | `Generator` has private `inner` field | tests |
+| `crates/ids/src/lib.rs` | `next_id_ensures` | wraps `Generator::next_id` which uses `std::sync::Mutex` (not yet lifted onto a vstd lock primitive — Stream 3 Phase 2b) | unit tests + TLC F8 invariant |
+| `crates/ids/src/lib.rs` | `inner_state(g)` (closed spec, opaque) | Stream 3 Phase 2a: spec projector from opaque `Generator` to its `LockState` newtype, so `count(g)` body can be written non-opaquely. | derived |
+| `crates/ids/src/lib.rs` | `lock_state_value(s)` (closed spec, opaque) | Stream 3 Phase 2a: spec wrapper around `LockState::lock_value`. | unit tests asserting `lock_value() == current()` |
+| `crates/ids/src/lib.rs` | `ExGenerator` external_type_specification | `Generator` has private `inner` field; structural opaqueness | tests |
+| `crates/ids/src/lib.rs` | `ExLockState` external_type_specification | Stream 3 Phase 2a: `LockState` newtype is opaque to Verus until Phase 2b lifts it. | tests |
 | `crates/store/src/lib.rs` | `verus_proof` (trusted skeleton) | F3/F6/F9 documented; full proofs require lifting `Mutex`/`HashMap` to vstd shims out of scope | unit + integration + conformance tests |
 | `crates/service/src/lib.rs` | `verus_proof` (trusted skeleton) | composition obligations (F1+F6, F2 sort) documented; out of scope | unit + integration + conformance tests |
 
