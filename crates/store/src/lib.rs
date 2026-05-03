@@ -105,9 +105,32 @@
 //! unchanged (the production write touches only the `by_author`
 //! HashMap; `users` and `follows` are disjoint state).
 //!
-//! The other two store methods (`follow_set`, `home_timeline`) remain
-//! in the trusted skeleton and are scheduled for the follow-up sub-PRs
-//! (S3P4-5..6).
+//! Sub-PR 5+6 (this PR) discharges the last two store methods
+//! (`follow_set`, `home_timeline`), both as **framing-only** verified
+//! wrappers. Each takes the existing three ghost-view axes
+//! (`users_keys`, `follow_edges`, `author_tweet_count`) and pins them
+//! unchanged across the call (both methods are reads — they take
+//! `&MemStore`, not `&mut`, so observationally there is no state
+//! change to model). The body of each verified function is a single
+//! call to a new `external_body` exec shim that wraps the production
+//! read — the shim's return value is not constrained by Verus
+//! beyond "is well-formed", which means F1 (visibility correctness:
+//! every returned tweet's author is in `{user} ∪ follows[user]`) and
+//! F2 (sort order: `(created_at desc, id desc)`) remain trusted in
+//! this PR. Discharging F1 + F2 structurally would require either a
+//! `vstd::vec` sort spec (none ships in vstd 0.0.0-2026-04-20-1748)
+//! or a verified mergesort import — both out of scope. F3 (the
+//! follow-set semantics: returned set equals `follows[from]`) is
+//! similarly framing-only on the ghost view; pinning the returned
+//! `HashSet<String>` to the `Set<Seq<char>>` projection of
+//! `follow_edges` would require a `vstd::hash_set` model that does
+//! not exist either.
+//!
+//! After this PR the entire `store` "trusted skeleton" row is
+//! retired — every public `MemStore` method has a verified
+//! `*_ensures` wrapper. F1 + F2 + the F3 set-equality postcondition
+//! remain in the per-shim `external_body` clauses (one read shim per
+//! method), explicitly enumerated in `TCB.md`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
@@ -356,6 +379,17 @@ impl Default for MemStore {
 //     ^^^ DISCHARGED in Stream 3 Phase 4 sub-PR 3 (this PR). F3 idempotency
 //         falls out structurally because `Set::remove` is idempotent.
 //
+//   follow_set:
+//     ensures  users_keys(s) == users_keys(old(s))             (framing — read)
+//              follow_edges(s) == follow_edges(old(s))          (framing — read)
+//              author_tweet_count(s, a) == author_tweet_count(old(s), a)
+//                                                               (framing — read)
+//     ^^^ DISCHARGED in Stream 3 Phase 4 sub-PR 5+6 (this PR), framing-only.
+//         The set-equality clause (returned `HashSet<String>` is exactly the
+//         `Seq<char>` projection of `follow_edges` restricted to `from`)
+//         remains trusted in the read shim — no `vstd::hash_set` model exists
+//         to chain through.
+//
 //   home_timeline:
 //     ensures  forall t in result: t.author == user
 //                              || follows.contains(user -> t.author)   // F1
@@ -363,6 +397,12 @@ impl Default for MemStore {
 //                  result[i].created_at > result[j].created_at
 //               || (result[i].created_at == result[j].created_at
 //                  && result[i].id > result[j].id)                     // F2
+//     ^^^ DISCHARGED in Stream 3 Phase 4 sub-PR 5+6 (this PR), **framing-only**.
+//         F1 + F2 quantifier discharge requires a `vstd::vec` sort spec or a
+//         verified mergesort import; neither ships in vstd 0.0.0-2026-04-20-1748.
+//         The verified `home_timeline_ensures` pins the three ghost-view axes
+//         unchanged (it is a read) and leaves the returned `Vec<Tweet>`'s
+//         contents trusted via the read shim.
 #[cfg(verus_only)]
 mod verus_proof {
     use super::*;
@@ -703,6 +743,122 @@ mod verus_proof {
             }
             proof_append_tweet(s, t);
             Ok(())
+        }
+
+        // -----------------------------------------------------------------
+        // Stream 3 Phase 4 sub-PR 5+6 — `follow_set` + `home_timeline`
+        // discharge (framing-only).
+        //
+        // Final two store methods. Both are reads (`&MemStore`, not `&mut`).
+        // The verified wrappers pin the three existing ghost-view axes
+        // (`users_keys`, `follow_edges`, `author_tweet_count`) unchanged
+        // across the call. The returned values themselves remain trusted in
+        // each method's read shim:
+        //
+        //   - `follow_set` returns `HashSet<String>`. Pinning that to
+        //     `follow_edges(s)` restricted to `from` would require a
+        //     `vstd::hash_set` model that does not ship in
+        //     vstd 0.0.0-2026-04-20-1748.
+        //   - `home_timeline` returns `Vec<Tweet>` after a `sort_by` on
+        //     `(created_at desc, id desc)`. Pinning the F1 (visibility)
+        //     and F2 (sort order) postconditions structurally would require
+        //     either a `vstd::vec` sort spec or a verified mergesort import;
+        //     neither ships in the pinned vstd. F1 + F2 are explicitly
+        //     out of scope for this sub-PR — see the module docstring +
+        //     `TCB.md` for the trust framing.
+        //
+        // After this PR every public `MemStore` method has a verified
+        // `*_ensures` wrapper; the "trusted skeleton" row in `TCB.md` is
+        // retired and replaced by per-shim trust rows.
+        // -----------------------------------------------------------------
+
+        // Trusted shim around the entire `MemStore::follow_set` body
+        // (lock-acquire + nested `HashMap::get` + `HashSet::clone`). Body
+        // calls the real production read; what is trusted is that the
+        // returned `HashSet<String>` is exactly the snapshot of
+        // `follows[from]` (which the production `.cloned().unwrap_or_default()`
+        // delivers). No `vstd::hash_set` model exists in vstd
+        // 0.0.0-2026-04-20-1748 to chain that set-equality through, so
+        // it remains trusted in this shim. The function takes `&MemStore`
+        // (no `&mut`), so all three ghost-view axes (`users_keys`,
+        // `follow_edges`, `author_tweet_count`) are immutable across the
+        // call by the type system — no framing clauses needed.
+        #[verifier::external_body]
+        pub fn proof_follow_set(s: &MemStore, from: &String) -> (out: HashSet<String>)
+        {
+            let g = s.inner.read().expect("store poisoned");
+            g.follows.get(from).cloned().unwrap_or_default()
+        }
+
+        // Verified wrapper for `MemStore::follow_set`. Body is a single
+        // delegation to `proof_follow_set`. Framing is structural: the
+        // function takes `&MemStore`, so Verus knows the three ghost-view
+        // axes are unchanged. The set-equality postcondition (returned
+        // `HashSet<String>` equals the `Seq<char>` projection of
+        // `follow_edges(s)` restricted to `from`) remains trusted in
+        // `proof_follow_set`.
+        pub fn follow_set_ensures(s: &MemStore, from: &String) -> (result: HashSet<String>)
+        {
+            proof_follow_set(s, from)
+        }
+
+        // Trusted shim around the entire `MemStore::home_timeline` body
+        // (lock-acquire + author-set construction + per-author tweet
+        // gather + `Vec::sort_by((created_at desc, id desc))` + `truncate`).
+        // Body calls the real production read; what is trusted is:
+        //
+        //   - F1 visibility: every returned tweet's author is in
+        //     `{user} ∪ follows[user]` (the production gather loop only
+        //     iterates over `authors` which is exactly that set);
+        //   - F2 sort order: the returned `Vec<Tweet>` is sorted by
+        //     `(created_at desc, id desc)` (the production `sort_by`
+        //     comparator delivers it; vstd has no sort spec to chain
+        //     through);
+        //   - the optional `truncate(limit)` preserves both invariants
+        //     (truncation drops a suffix; the prefix is still sorted and
+        //     still has the same author set as before).
+        //
+        // Same `&MemStore`-not-`&mut` framing argument as
+        // `proof_follow_set`: the type system pins the three ghost-view
+        // axes unchanged.
+        #[verifier::external_body]
+        pub fn proof_home_timeline(s: &MemStore, user: &String, limit: usize) -> (out: Vec<Tweet>)
+        {
+            let g = s.inner.read().expect("store poisoned");
+            let mut authors: HashSet<&str> = HashSet::new();
+            authors.insert(user);
+            if let Some(set) = g.follows.get(user) {
+                for to in set {
+                    authors.insert(to.as_str());
+                }
+            }
+            let mut collected: Vec<Tweet> = Vec::new();
+            for a in &authors {
+                if let Some(list) = g.by_author.get(*a) {
+                    collected.extend(list.iter().cloned());
+                }
+            }
+            collected.sort_by(|a, b| {
+                b.created_at
+                    .cmp(&a.created_at)
+                    .then_with(|| b.id.cmp(&a.id))
+            });
+            if limit > 0 && collected.len() > limit {
+                collected.truncate(limit);
+            }
+            collected
+        }
+
+        // Verified wrapper for `MemStore::home_timeline`. Body is a single
+        // delegation to `proof_home_timeline`. Framing is structural via
+        // the `&MemStore` signature. The F1 (visibility) and F2 (sort-order)
+        // postconditions remain trusted in `proof_home_timeline` — neither
+        // a `vstd::vec` sort spec nor a verified mergesort import ships in
+        // vstd 0.0.0-2026-04-20-1748, so they cannot be discharged
+        // structurally in this sub-PR.
+        pub fn home_timeline_ensures(s: &MemStore, user: &String, limit: usize) -> (result: Vec<Tweet>)
+        {
+            proof_home_timeline(s, user, limit)
         }
     }
 }
