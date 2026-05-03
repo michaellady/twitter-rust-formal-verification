@@ -212,51 +212,195 @@ impl Default for Service {
 // Verus proof obligations (F1, F2, F4 dispatched here; F6/F7/F8 by composition).
 // =============================================================================
 //
-// # Stream 3 Phase 5 status — `Service::tick` composition (TCB-narrowing only)
+// # Stream 3 Phase 5 sub-PR R2 — `Service::has_user` + `Service::create_user` discharge
 //
-// `Service::tick` is the smallest service-side composition: it is pure
-// delegation to `Clock::tick`, whose F7 obligations
-// (`now_ensures` / `tick_ensures`) are already discharged in `crates/clock`
-// (Stream 3 Phase 1b — see `clock::verus_proof`).
+// Builds on the Phase 5 sub-PR (R1, PR #24) that landed `Service::tick` as a
+// TCB-narrowing-only stub. R2 actually discharges two service-layer methods
+// that route entirely through the *concrete* `Service.st: MemStore` field —
+// **not** through `Service.clk: Arc<dyn Clock>`. The R1 trait-object-modeling
+// blocker therefore does not apply: `MemStore` is a concrete type with
+// already-discharged `*_ensures` wrappers (Stream 3 Phase 4 sub-PRs 1+2).
 //
-// Phase 5 ships `Service::tick` as a thin wrapper but does **not** ship a
-// verified `tick_ensures(s: &mut Service)` lemma in this block. The
-// structural blockers:
+// Discharge shape — same trusted-shim pattern Phase 1b/4 established, lifted
+// one layer up to `&Service`:
 //
-//   1. `Service.clk` is `Arc<dyn Clock>` — a trait object behind an `Arc`.
-//      Verus has no model of `Arc` or `dyn Trait` dispatch in
-//      vstd 0.0.0-2026-04-20-1748 — chaining `clock::tick_ensures`
-//      through the trait-object call would require either a vstd `Arc`
-//      model or a custom trait-resolution shim, both out of scope here.
-//   2. `clock::verus_proof` is a private module; its `ts(c)` ghost view
-//      and `tick_ensures` lemma are not currently re-exported across
-//      crate boundaries. Cross-crate `verus_proof` reuse is novel
-//      infrastructure — no other crate in the workspace does it today,
-//      and bootstrapping it for one delegation method is much larger
-//      than the per-method sub-PR cadence the brief contemplates.
+//   1. `Service` is treated as opaque to Verus (`ExService` =
+//      `external_type_specification` + `external_body`). Same reason
+//      `MemStore` is opaque: `Service` has an `Arc<dyn Clock>` field
+//      vstd 0.0.0-2026-04-20-1748 cannot model. The opaque view
+//      *neutralizes* that field for the verifier — Verus reasons about
+//      `Service` only through the ghost view + shims defined here.
+//   2. A single ghost view `service_users_keys(s: &Service) -> Set<Seq<char>>`
+//      models the set of registered handles, projected through `Service.st`.
+//      Body opaque (`external_body`): cross-crate `verus_proof` reuse of
+//      `store::users_keys` is the same novel-infrastructure blocker R1
+//      called out for `clock`. Worked around by re-defining the axis at
+//      the service layer.
+//   3. Two `external_body` exec shims (`proof_service_has_user`,
+//      `proof_service_put_user`) bottom out in the production calls
+//      `s.st.has_user(...)` / `s.st.put_user(...)`. The shim bodies are
+//      one-liners against the same production methods Phase 4 already
+//      verified at the store layer; what is trusted here is the
+//      cross-layer projection of `service_users_keys` through `Service.st`.
 //
-// Phase 5's deliverable is therefore TCB-narrowing only: the public
-// `Service::tick` method exists (so future verified composition has a
-// stable target), and the trusted-skeleton row in `TCB.md` is rewritten
-// to call out the two blockers above explicitly. When `vstd` ships an
-// `Arc<dyn Trait>` model (or when `Service` swaps `Arc<dyn Clock>` for a
-// concrete `Arc<Logical>` field — a public-API change punted to a later
-// sub-PR), this lemma can be discharged by chaining `clock::tick_ensures`
-// through it.
+// What R2 actually verifies (the `*_ensures` lemmas below):
 //
-// `post_tweet`, `follow`, `home_timeline` obligations remain documented
-// above. Their full discharge requires the same trait-object-modeling work
-// plus lifting Mutex/HashMap/Vec through vstd shims, scheduled for sub-PRs
-// after the corresponding store methods land.
+//   - `has_user_ensures(s: &Service, handle: &String) -> bool`
+//     ensures `result == service_users_keys(s).contains(handle@)`.
+//   - `create_user_ensures(s: &mut Service, handle: &String) -> Result<User, ServiceError>`
+//     ensures the F3 dup-rejection contract on the handle axis:
+//     `EmptyHandle` short-circuits with no state change; otherwise
+//     `service_users_keys(old(s)).contains(handle@) ==> result is Err`,
+//     `!service_users_keys(old(s)).contains(handle@) ==> result is Ok`,
+//     and the inserted handle ends up in the post-state set.
+//
+// What stays trusted in R2 (explicit non-goals):
+//
+//   - `Service::tick` composition (still the R1 blocker — `Arc<dyn Clock>`).
+//   - `post_tweet`, `follow`, `home_timeline` (need clock + dom + the
+//     per-axis store discharge composition); scheduled for later sub-PRs.
+//   - The returned `User`'s `id` field on `create_user`: the ghost view
+//     models only the handle axis. The id is generated by
+//     `self.user_ids.next_id()` (F8, discharged at `ids::next_id_ensures`)
+//     but threading it through `&mut Service` requires modeling
+//     `Service.user_ids` as a separate ghost-view axis — out of scope here.
+//   - The `User` payload's `handle` field equals the requested handle: the
+//     production `User { handle: handle.to_string() }` literal makes this
+//     true by construction; pinning it in the ensures clause requires a
+//     `String::to_string` spec the shim trusts.
 #[cfg(verus_only)]
 mod verus_proof {
     use super::*;
     use vstd::prelude::*;
     verus! {
-        // Trusted skeleton: see module-level commentary above for the
-        // Phase 5 `Service::tick` composition status (TCB-narrowing
-        // only; verified delegation blocked on `Arc<dyn Clock>`
-        // modeling + cross-crate `verus_proof` reuse infrastructure).
+        // `Service` is opaque to Verus — it carries an `Arc<dyn Clock>`
+        // field that vstd 0.0.0-2026-04-20-1748 has no model for.
+        // Reasoned about exclusively through the `service_users_keys`
+        // ghost view + the `proof_service_*` shims below. Same trust
+        // shape Stream 3 Phase 4 established for `MemStore`, lifted one
+        // layer up to the service composition point.
+        #[verifier::external_type_specification]
+        #[verifier::external_body]
+        pub struct ExService(crate::Service);
+
+        #[verifier::external_type_specification]
+        pub struct ExServiceError(crate::ServiceError);
+
+        // Ghost view of the set of currently-registered user handles
+        // (each handle viewed as the `Seq<char>` projection of its
+        // String key), projected through `Service.st: MemStore`. Body
+        // opaque: cross-crate `verus_proof` reuse of `store::users_keys`
+        // is the novel-infrastructure blocker called out in R1 for
+        // `clock::tick_ensures`. Worked around here by re-defining the
+        // axis at the service layer; the two shims below pin their
+        // results back to it.
+        #[verifier::external_body]
+        pub closed spec fn service_users_keys(s: &Service) -> Set<Seq<char>> {
+            unimplemented!()
+        }
+
+        // Trusted shim around `Service::has_user`'s composition step
+        // (`s.st.has_user(handle.as_str())`). Body calls the real
+        // production method on the concrete `MemStore` field; what is
+        // trusted is the cross-layer projection — `service_users_keys(s)`
+        // is by-construction the same set as `store::users_keys(s.st)`,
+        // but Verus cannot see that equality across the private
+        // `store::verus_proof` boundary, so it is asserted here as the
+        // shim's ensures.
+        #[verifier::external_body]
+        pub fn proof_service_has_user(s: &Service, handle: &String) -> (out: bool)
+            ensures out == service_users_keys(s).contains(handle@)
+        {
+            s.st.has_user(handle.as_str())
+        }
+
+        // Trusted shim around `Service::create_user`'s store-side
+        // composition step (`self.st.put_user(u)?` plus the implicit
+        // `self.user_ids.next_id()` call needed to construct `u`).
+        // Models the handle-axis post-state of the ghost view: on
+        // success the handle ends up in `service_users_keys(s)` and
+        // the result is Ok; on duplicate the set is unchanged and
+        // the result is Err. The id-axis (F8) is not modeled here —
+        // see module commentary above. Signature takes `&mut Service`
+        // so Verus can express the post-state of the ghost view; the
+        // production op only needs `&self` (interior mutability via
+        // `MemStore`'s `RwLock`). Sound because the production call
+        // chain holds the store's write lock during the put.
+        #[verifier::external_body]
+        pub fn proof_service_put_user(s: &mut Service, handle: &String) -> (result: Result<User, ServiceError>)
+            ensures
+                service_users_keys(old(s)).contains(handle@) ==> result is Err,
+                !service_users_keys(old(s)).contains(handle@) ==> result is Ok,
+                result is Ok ==> service_users_keys(s) == service_users_keys(old(s)).insert(handle@),
+                result is Err ==> service_users_keys(s) == service_users_keys(old(s)),
+        {
+            let u = User { id: s.user_ids.next_id(), handle: handle.clone() };
+            match s.st.put_user(u.clone()) {
+                Ok(()) => Ok(u),
+                Err(e) => Err(ServiceError::from(e)),
+            }
+        }
+
+        // R2 discharge — verified read-only wrapper for `Service::has_user`.
+        // Pure verified function: takes `&Service` (read), reuses the
+        // `proof_service_has_user` shim whose post-condition pins the
+        // returned `bool` to `service_users_keys(s).contains(handle@)`.
+        // This is exactly the body of the production `Service::has_user`
+        // (one-line delegation to `self.st.has_user`), expressed against
+        // the trusted shim.
+        pub fn has_user_ensures(s: &Service, handle: &String) -> (result: bool)
+            ensures result == service_users_keys(s).contains(handle@),
+        {
+            proof_service_has_user(s, handle)
+        }
+
+        // R2 discharge — verified wrapper for `Service::create_user`.
+        // Encodes the F3 dup-rejection contract on the handle axis:
+        //
+        //   ensures
+        //     handle@.len() == 0 ==> result is Err,
+        //     handle@.len() == 0 ==> service_users_keys(s) == service_users_keys(old(s)),
+        //     handle@.len() > 0 && service_users_keys(old(s)).contains(handle@) ==> result is Err,
+        //     handle@.len() > 0 && !service_users_keys(old(s)).contains(handle@) ==> result is Ok,
+        //     result is Ok ==> service_users_keys(s) == service_users_keys(old(s)).insert(handle@),
+        //     result is Err ==> service_users_keys(s) == service_users_keys(old(s)),
+        //
+        // Body mirrors the production `Service::create_user` control flow
+        // exactly: empty-handle short-circuit, then chain through the
+        // `proof_service_put_user` shim which composes the F8 id call +
+        // the F3 store-side dup check.
+        pub fn create_user_ensures(s: &mut Service, handle: &String) -> (result: Result<User, ServiceError>)
+            ensures
+                handle@.len() == 0 ==> result is Err,
+                handle@.len() == 0 ==> service_users_keys(s) == service_users_keys(old(s)),
+                handle@.len() > 0 && service_users_keys(old(s)).contains(handle@) ==> result is Err,
+                handle@.len() > 0 && !service_users_keys(old(s)).contains(handle@) ==> result is Ok,
+                result is Ok ==> service_users_keys(s) == service_users_keys(old(s)).insert(handle@),
+                result is Err ==> service_users_keys(s) == service_users_keys(old(s)),
+        {
+            // `String::as_str().is_empty()` chains through the vstd
+            // assume_specifications for `String::as_str` (`res@ == s@`)
+            // and `str::is_empty` (`res == (s@.len() == 0)`), giving
+            // Verus the bridge from the exec branch to the `handle@.len() == 0`
+            // spec clauses above.
+            if handle.as_str().is_empty() {
+                return Err(ServiceError::EmptyHandle);
+            }
+            proof_service_put_user(s, handle)
+        }
+
+        // `Service::tick` composition (R1 status; unchanged by R2).
+        // Verified `tick_ensures(s: &mut Service)` lemma is **not** shipped
+        // here — `Service.clk: Arc<dyn Clock>` has no Verus model in
+        // vstd 0.0.0-2026-04-20-1748, and `clock::verus_proof` is a private
+        // module so cross-crate reuse of `clock::tick_ensures` requires
+        // novel infrastructure. F7 itself remains discharged in
+        // `crates/clock` (Phase 1b). When either blocker resolves the
+        // lemma can land as a follow-up sub-PR.
+        //
+        // `post_tweet`, `follow`, `home_timeline` discharge composes
+        // additional axes (clock for F7, dom for F4, follow_edges for F9,
+        // author_tweet_count for F6) and is scheduled for sub-PRs after R2.
     }
 }
 
