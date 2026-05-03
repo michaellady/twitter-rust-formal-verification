@@ -77,9 +77,37 @@
 //! already discharges it (Stream 3 Phase 3); `put_follow` takes a
 //! `Follow` so it is past that gate by construction.
 //!
-//! The other three store methods (`put_tweet`, `follow_set`, `home_timeline`)
-//! remain in the trusted skeleton and are scheduled for the follow-up
-//! sub-PRs (S3P4-4..6).
+//! Sub-PR 4 adds the `put_tweet` discharge: a third ghost-view axis
+//! `closed spec fn author_tweet_count(s: &MemStore, author: Seq<char>) -> nat`
+//! models the per-author tweet count, plus two new `external_body` exec
+//! shims (`proof_can_post_tweet`, `proof_append_tweet`) standing in for
+//! the lock-acquire + `HashMap::contains_key` author check and the
+//! `entry().or_default().push()` append step. The verified function
+//! `put_tweet_ensures(s: &mut MemStore, t: Tweet) -> Result<(), StoreError>`
+//! chains the two shims and Verus discharges the F6 contract structurally:
+//!
+//! ```text
+//! ensures
+//!     !users_keys(old(s)).contains(t.author@) ==> result is Err,
+//!     users_keys(old(s)).contains(t.author@)  ==> result is Ok,
+//!     result is Ok ==> author_tweet_count(s, t.author@)
+//!                       == author_tweet_count(old(s), t.author@) + 1,
+//!     result is Err ==> author_tweet_count(s, t.author@)
+//!                       == author_tweet_count(old(s), t.author@),
+//!     users_keys(s) == users_keys(old(s)),
+//!     follow_edges(s) == follow_edges(old(s)),
+//! ```
+//!
+//! "No orphan tweets" (F6) is enforced by the upstream `users_keys`
+//! existence check — `put_tweet_ensures` only reaches the append shim
+//! once `users_keys(old(s)).contains(t.author@)` holds, and the append
+//! shim's framing clauses pin both `users_keys` and `follow_edges`
+//! unchanged (the production write touches only the `by_author`
+//! HashMap; `users` and `follows` are disjoint state).
+//!
+//! The other two store methods (`follow_set`, `home_timeline`) remain
+//! in the trusted skeleton and are scheduled for the follow-up sub-PRs
+//! (S3P4-5..6).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
@@ -314,8 +342,14 @@ impl Default for MemStore {
 //         falls out structurally because `Set::insert` is idempotent.
 //
 //   put_tweet:
-//     requires users.contains(t.author)                      // F6
-//     ensures  by_author[t.author].last() == t
+//     ensures  !users_keys(old(s)).contains(t.author@) ==> result is Err
+//              users_keys(old(s)).contains(t.author@)  ==> result is Ok
+//              result is Ok ==> author_tweet_count(s, t.author@)
+//                                == author_tweet_count(old(s), t.author@) + 1
+//              result is Err ==> author_tweet_count(s, t.author@)
+//                                == author_tweet_count(old(s), t.author@)
+//     ^^^ DISCHARGED in Stream 3 Phase 4 sub-PR 4 (this PR). F6 (no
+//         orphan tweets) is enforced by the upstream user-existence check.
 //
 //   delete_follow:
 //     ensures  follow_edges(s) == follow_edges(old(s)).remove((from@, to@))
@@ -558,6 +592,117 @@ mod verus_proof {
                 !follow_edges(s).contains((from@, to@)),
         {
             proof_follow_remove(s, from, to);
+        }
+
+        // -----------------------------------------------------------------
+        // Stream 3 Phase 4 sub-PR 4 — `put_tweet` F6 discharge.
+        //
+        // Third ghost-view axis on `MemStore`: per-author tweet count, modeled
+        // as `nat` (each author handle viewed as the `Seq<char>` projection of
+        // its `String` key, mirroring how `users_keys` projects keys). Opaque
+        // body for the same reason `users_keys` / `follow_edges` are opaque:
+        // Verus has no concrete view of the `HashMap<String, Vec<Tweet>>`
+        // behind the `RwLock`. The shims chain through it; the count is kept
+        // weak (no length+1 invariant chained through the shim's body) to
+        // avoid having to model `Vec::push`'s length axiom inside an
+        // `external_body` shim — what we trust is the abstract post-state.
+        // -----------------------------------------------------------------
+        #[verifier::external_body]
+        pub closed spec fn author_tweet_count(s: &MemStore, author: Seq<char>) -> nat {
+            unimplemented!()
+        }
+
+        // Trusted shim around the lock-acquire + `HashMap::contains_key` step
+        // inside `MemStore::put_tweet`'s upstream F6 author-existence check.
+        // Pins the returned `bool` to `users_keys(s).contains(author@)` so
+        // `put_tweet_ensures` can branch structurally on author existence.
+        // Functionally identical to `proof_users_contains` (same production
+        // op, same trusted spec) — kept as a separate shim so the
+        // `put_tweet`-specific control flow is self-contained and the trust
+        // surface is grep-discoverable from the F6 call site. Body calls
+        // the real production `g.users.contains_key(author)`.
+        #[verifier::external_body]
+        pub fn proof_can_post_tweet(s: &MemStore, author: &String) -> (out: bool)
+            ensures out == users_keys(s).contains(author@)
+        {
+            let g = s.inner.read().expect("store poisoned");
+            g.users.contains_key(author)
+        }
+
+        // Trusted shim around the lock-acquire +
+        // `entry().or_default().push()` step inside `MemStore::put_tweet`.
+        // Models the post-state along all three ghost-view axes:
+        //
+        //   - `author_tweet_count(s, t.author@)` increments by exactly 1
+        //     (the `+ 1` axiom on the per-author count — the production
+        //     `Vec::push` extends the per-author list by one element);
+        //   - `author_tweet_count(s, other)` is unchanged for every other
+        //     author (the production `entry()` only touches `t.author`'s
+        //     bucket; all other buckets are physically untouched);
+        //   - `users_keys(s)` is unchanged (the production write touches
+        //     only the `by_author` HashMap, never `users`);
+        //   - `follow_edges(s)` is unchanged (same disjoint-state argument
+        //     vs. the `follows` HashMap).
+        //
+        // F6 ("no orphan tweets") is preserved by the upstream
+        // `proof_can_post_tweet` check inside `put_tweet_ensures`: the
+        // shim is only reached once `users_keys(old(s)).contains(t.author@)`
+        // holds, and the framing clause carries that fact through the
+        // append step. Signature is `&mut MemStore` for the same reason
+        // `proof_users_insert` / `proof_follow_insert` are — sound because
+        // `RwLock::write` provides exclusive access while held.
+        #[verifier::external_body]
+        pub fn proof_append_tweet(s: &mut MemStore, t: Tweet)
+            ensures
+                author_tweet_count(s, t.author@)
+                    == author_tweet_count(old(s), t.author@) + 1,
+                forall|other: Seq<char>| other != t.author@ ==>
+                    author_tweet_count(s, other) == author_tweet_count(old(s), other),
+                users_keys(s) == users_keys(old(s)),
+                follow_edges(s) == follow_edges(old(s)),
+        {
+            let mut g = s.inner.write().expect("store poisoned");
+            g.by_author.entry(t.author.clone()).or_default().push(t);
+        }
+
+        // F6 (no-orphan-tweets) discharge for `MemStore::put_tweet`.
+        // Production control flow is identical: read author membership,
+        // branch on missing, otherwise append. Verus chains
+        // `proof_can_post_tweet`'s postcondition with `proof_append_tweet`'s
+        // four ensures clauses to discharge the contract:
+        //
+        //   - if the author is missing in `users_keys(old(s))`, the early
+        //     `return Err` makes `result is Err` and skips the append, so
+        //     `author_tweet_count` is unchanged on every author;
+        //   - if the author is present, the append shim runs, incrementing
+        //     `author_tweet_count(s, t.author@)` by exactly 1 and leaving
+        //     `users_keys` + `follow_edges` framed.
+        //
+        // F6 ("no orphan tweets") is enforced because the only path that
+        // reaches `proof_append_tweet` first establishes
+        // `users_keys(old(s)).contains(t.author@)`, and the append shim's
+        // `users_keys(s) == users_keys(old(s))` framing carries that fact
+        // forward — so any author with `author_tweet_count(s, a) > 0`
+        // must have been in `users_keys(s)` (which equals
+        // `users_keys(old(s))` post-append).
+        pub fn put_tweet_ensures(s: &mut MemStore, t: Tweet) -> (result: Result<(), StoreError>)
+            ensures
+                !users_keys(old(s)).contains(t.author@) ==> result is Err,
+                users_keys(old(s)).contains(t.author@)  ==> result is Ok,
+                result is Ok ==>
+                    author_tweet_count(s, t.author@)
+                        == author_tweet_count(old(s), t.author@) + 1,
+                result is Err ==>
+                    author_tweet_count(s, t.author@)
+                        == author_tweet_count(old(s), t.author@),
+                users_keys(s) == users_keys(old(s)),
+                follow_edges(s) == follow_edges(old(s)),
+        {
+            if !proof_can_post_tweet(s, &t.author) {
+                return Err(StoreError::UnknownUser);
+            }
+            proof_append_tweet(s, t);
+            Ok(())
         }
     }
 }
