@@ -245,7 +245,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build + push (pass 1: no version baked yet)
+      - name: "Build and push (pass 1: no version baked yet)"
         id: push1
         uses: docker/build-push-action@v6
         with:
@@ -255,7 +255,7 @@ jobs:
           build-args: |
             GIT_SHA=${{ github.sha }}
             IMAGE_DIGEST=sha256:pending
-      - name: Re-tag with version baked in (pass 2)
+      - name: "Re-tag with version baked in (pass 2)"
         id: push
         uses: docker/build-push-action@v6
         with:
