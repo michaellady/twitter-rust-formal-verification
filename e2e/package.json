@@ -1,0 +1,14 @@
+{
+  "name": "twitter-formal-rust-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Tier-4 Phase 3 — Playwright E2E conformance suite. Mirrors the F-properties at the UI layer.",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "typescript": "^5.6.0"
+  }
+}
