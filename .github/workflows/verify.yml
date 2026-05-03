@@ -202,3 +202,73 @@ jobs:
       - name: Skipped (docs-only)
         if: steps.detect.outputs.skip == 'true'
         run: echo "skipped — docs-only PR"
+
+  # ---------------------------------------------------------------------------
+  # Tier-4 Phase 1: build verified image after every verifier passes.
+  # On main pushes, push to GHCR and emit the image-digest artifact that
+  # deploy.yml promotes via `flyctl deploy --image @sha256:<digest>`.
+  # ---------------------------------------------------------------------------
+
+  build-image-pr:
+    name: build-image (PR validation only)
+    if: github.event_name == 'pull_request'
+    needs: [verus, tlc]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read   # K6: PR runs do NOT get write to GHCR
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Validate Dockerfile builds (no push)
+        run: docker build -t verify-build-only:${{ github.sha }} .
+
+  build-image-main:
+    name: build-image + push to GHCR
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [verus, tlc]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write  # K6: only main pushes can push images
+    outputs:
+      image_digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build + push (pass 1: no version baked yet)
+        id: push1
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:pre-${{ github.sha }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            IMAGE_DIGEST=sha256:pending
+      - name: Re-tag with version baked in (pass 2)
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:git-${{ github.sha }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            IMAGE_DIGEST=${{ steps.push1.outputs.digest }}
+      - name: Write digest artifact
+        run: echo "${{ steps.push.outputs.digest }}" > image-digest.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-digest-${{ github.sha }}
+          path: image-digest.txt
+          retention-days: 14

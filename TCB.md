@@ -34,7 +34,12 @@ The Tier-3 baseline below was inventoried during the Tier-3 verifier-strictness 
 |---|---|---|---|
 | `crates/server/src/main.rs` | tokio + axum bootstrap | wires verified core to `net::TcpListener`; not in spec | smoke tests; live demo |
 | `crates/server/src/handlers.rs` | all HTTP handlers | JSON serde + error mapping; not in spec | conformance tests; stream 2 diff-test (when live) |
+| `crates/server/src/handlers.rs` | `healthz`, `version` | Tier-4 Phase 1 endpoints; `/version` reads `/etc/version.json` baked into image at build time | post-deploy digest verification in deploy.yml |
 | `.github/workflows/verify.yml` | CI verification gate | enforces TLC + `cargo verus verify --workspace` strict on every push | self-check on every PR |
+| `.github/workflows/verify.yml` | `build-image-pr` / `build-image-main` jobs | Tier-4 Phase 1: builds + pushes verified image to GHCR after every verifier passes; main-only push permission per K6 | image-digest artifact propagated to deploy.yml |
+| `.github/workflows/deploy.yml` | deploy via image-digest promotion | Tier-4 Phase 1: pulls verified image by digest, never rebuilds; post-deploy /version digest check | mismatch fails the deploy |
+| `Dockerfile` | runtime image build | distroless base; bakes `/etc/version.json` for image-digest provenance | image-digest verification gate |
+| `fly.toml` | Fly app config | deploy target; healthz check, port, region | manual `flyctl deploy` validates on first run |
 | `scripts/run_tlc.sh` | TLC runner | invokes Java + tla2tools.jar | macOS shim guard added in Tier 3 |
 
 ## Trust surface categories (for new entries)
