@@ -22,6 +22,42 @@
 //! See the `verus_proof` module at the bottom of this file. The trusted
 //! wrappers `vstd::hash_map`, `vstd::vec`, and `vstd::sync::RwLock` are the
 //! TCB for the data structures themselves.
+//!
+//! # Stream 3 Phase 4 sub-PR 1 — `put_user` discharge
+//!
+//! `MemStore::put_user`'s F3 dup-rejection contract is now actually
+//! checked by Verus rather than left as a "trusted skeleton". The
+//! discharge follows the same shape Phase 1b established for `clock`:
+//!
+//!   - The `MemStore` struct itself stays opaque to Verus (vstd
+//!     0.0.0-2026-04-20-1748 has no model of `std::sync::RwLock`, and
+//!     the inner `HashMap<String, User>` lives behind that lock — so
+//!     Verus cannot reason about field projections directly).
+//!   - A single ghost view, `closed spec fn users_keys(s: &MemStore) -> Set<Seq<char>>`,
+//!     models the set of registered handles.
+//!   - Two `external_body` exec shims (`proof_users_contains`,
+//!     `proof_users_insert`) stand in for the lock-acquire +
+//!     `HashMap::contains_key` / `HashMap::insert` operations. Their
+//!     bodies call the real production methods; their `ensures`
+//!     pin the result back to `users_keys(s)`.
+//!   - The verified function `put_user_ensures` chains the two shims
+//!     to discharge the actual contract: `(handle in users_keys(s)
+//!     ==> result is Err)` and the inverse on the success branch,
+//!     plus that the inserted handle ends up in the new key set.
+//!
+//! What the verifier now actually checks:
+//!
+//! ```text
+//! ensures
+//!     users_keys(old(s)).contains(u.handle@) ==> result is Err,
+//!     !users_keys(old(s)).contains(u.handle@) ==> result is Ok,
+//!     result is Ok ==> users_keys(s) == users_keys(old(s)).insert(u.handle@),
+//!     result is Err ==> users_keys(s) == users_keys(old(s)),
+//! ```
+//!
+//! The other six store methods (`has_user`, `put_follow`, `delete_follow`,
+//! `put_tweet`, `follow_set`, `home_timeline`) remain in the trusted
+//! skeleton and are scheduled for the follow-up sub-PRs (S3P4-2..7).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
@@ -237,6 +273,12 @@ impl Default for MemStore {
 // Sketches of the Verus contracts; see README for how these are discharged
 // and why std collections are part of the TCB (vstd::hash_map wraps them).
 //
+//   put_user:
+//     ensures  users_keys(old(s)).contains(u.handle@) ==> result is Err
+//              !users_keys(old(s)).contains(u.handle@) ==> result is Ok
+//              result is Ok ==> users_keys(s) == users_keys(old(s)).insert(u.handle@)
+//     ^^^ DISCHARGED in Stream 3 Phase 4 sub-PR 1 (this PR).
+//
 //   put_follow:
 //     requires users.contains(f.from) && users.contains(f.to) && f.from != f.to
 //     ensures  follows.contains(f.from -> f.to)             // F3 idempotent set
@@ -260,8 +302,90 @@ mod verus_proof {
     use super::*;
     use vstd::prelude::*;
     verus! {
-        // Obligations stated above, dispatched via #[verifier::external_body]
-        // wrappers because Mutex/HashMap require trusted shims in vstd.
+        // `MemStore` wraps `RwLock<Inner>` where `Inner` holds three
+        // `HashMap`s. vstd 0.0.0-2026-04-20-1748 has no model of
+        // `std::sync::RwLock` and `vstd::hash_map` cannot see through
+        // the lock, so we keep `MemStore` opaque (`external_body`)
+        // and reason about it through the trusted ghost view +
+        // shim functions below. Same trust shape Phase 1b
+        // established for `clock`, narrowed to just the registered-handle
+        // axis (the only state `put_user` touches).
+        #[verifier::external_type_specification]
+        #[verifier::external_body]
+        pub struct ExMemStore(crate::MemStore);
+
+        #[verifier::external_type_specification]
+        pub struct ExStoreError(crate::StoreError);
+
+        // Ghost view of the set of currently-registered user handles
+        // (each handle viewed as the `Seq<char>` projection of its
+        // String key). Body opaque: Verus has no concrete view of the
+        // `HashMap<String, User>` behind the `RwLock`. The shim
+        // functions below pin their results back to this set so that
+        // `put_user_ensures` can be discharged structurally.
+        #[verifier::external_body]
+        pub closed spec fn users_keys(s: &MemStore) -> Set<Seq<char>> {
+            unimplemented!()
+        }
+
+        // Trusted shim around the lock-acquire + `HashMap::contains_key`
+        // step inside `MemStore::put_user`. Body calls the real
+        // production read; what is trusted is the spec on
+        // `RwLock::write`'s exclusivity + `HashMap::contains_key`'s
+        // membership semantics.
+        #[verifier::external_body]
+        pub fn proof_users_contains(s: &MemStore, handle: &String) -> (out: bool)
+            ensures out == users_keys(s).contains(handle@)
+        {
+            let g = s.inner.read().expect("store poisoned");
+            g.users.contains_key(handle)
+        }
+
+        // Trusted shim around the lock-acquire + `HashMap::insert` step
+        // inside `MemStore::put_user`. Models the post-state of the
+        // ghost view: the inserted handle is now in `users_keys(s)`,
+        // and no other handle's membership changed. The signature
+        // takes `&mut MemStore` so Verus can express the post-state;
+        // the production op only needs `&self` (interior mutability
+        // via `RwLock`). The shim is sound because `RwLock::write`
+        // provides exclusive access while held — the critical section
+        // is observationally a `&mut` step.
+        #[verifier::external_body]
+        pub fn proof_users_insert(s: &mut MemStore, u: User)
+            ensures users_keys(s) == users_keys(old(s)).insert(u.handle@)
+        {
+            let mut g = s.inner.write().expect("store poisoned");
+            g.users.insert(u.handle.clone(), u);
+        }
+
+        // F3 (dup-rejection) discharge for `MemStore::put_user`. The
+        // body is the production control flow — read the membership
+        // bit, branch, optionally insert. Verus chains the two
+        // trusted shims' postconditions through the structural
+        // definition of `users_keys(s)` to discharge all four
+        // ensures clauses below.
+        //
+        // This is the actually-verified contract; the production
+        // `MemStore::put_user` is the same control flow expressed
+        // against the real `RwLock` + `HashMap` (no shims). The
+        // handle clone in the shim mirrors the production
+        // `g.users.insert(u.handle.clone(), u)` exactly — what
+        // we're trusting is that the std `HashMap::insert` and the
+        // `RwLock::write` pair faithfully realize "add `u.handle@`
+        // to the key set, observe nothing else."
+        pub fn put_user_ensures(s: &mut MemStore, u: User) -> (result: Result<(), StoreError>)
+            ensures
+                users_keys(old(s)).contains(u.handle@) ==> result is Err,
+                !users_keys(old(s)).contains(u.handle@) ==> result is Ok,
+                result is Ok ==> users_keys(s) == users_keys(old(s)).insert(u.handle@),
+                result is Err ==> users_keys(s) == users_keys(old(s)),
+        {
+            if proof_users_contains(s, &u.handle) {
+                return Err(StoreError::DuplicateUser);
+            }
+            proof_users_insert(s, u);
+            Ok(())
+        }
     }
 }
 
