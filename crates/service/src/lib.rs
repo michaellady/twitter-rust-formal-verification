@@ -299,6 +299,25 @@ impl Default for Service {
 //   - The cross-layer projection
 //     `service_follow_edges(s) == store::follow_edges(s.st)` —
 //     same novel-infrastructure blocker R2 called out for `service_users_keys`.
+//
+// # Stream 3 Phase 5 sub-PR R4 — `Service::home_timeline` discharge (framing-only)
+//
+// Pure-delegation discharge of the read-only `Service::home_timeline`
+// wrapper. Mirrors the framing-only shape Phase 4 sub-PR 5+6 used at the
+// store layer: `store::home_timeline_ensures` was discharged framing-only
+// there (F1 visibility and F2 sort-order remain trusted in
+// `store::proof_home_timeline` because vstd 0.0.0-2026-04-20-1748 ships
+// no `vstd::vec` sort spec and no verified mergesort), so the
+// service-layer wrapper carries the same framing-only contract one
+// composition layer up. New trust footprint: 1 `external_body` exec shim
+// (`proof_service_home_timeline` bottoming out in
+// `s.st.home_timeline(user.as_str(), limit)`); zero new ghost views.
+// What R4 verifies: framing on both ghost-view axes
+// (`service_users_keys`, `service_follow_edges`) via the
+// `&Service`-not-`&mut` signature — structural; no ensures clauses on
+// the returned `Vec<Tweet>`. What stays trusted in R4: F1 + F2 (still
+// pending the missing `vstd::vec` sort spec / verified mergesort at the
+// store layer).
 #[cfg(verus_only)]
 mod verus_proof {
     use super::*;
@@ -603,7 +622,68 @@ mod verus_proof {
             Ok(())
         }
 
-        // `Service::tick` composition (R1 status; unchanged by R2/R3).
+        // -----------------------------------------------------------------
+        // Stream 3 Phase 5 sub-PR R4 — `Service::home_timeline` discharge
+        // (framing-only).
+        //
+        // Pure-delegation discharge of the read-only `Service::home_timeline`
+        // wrapper. Mirrors the framing-only shape Phase 4 sub-PR 5+6 used at
+        // the store layer: the underlying `store::home_timeline_ensures` was
+        // discharged framing-only there (F1 visibility and F2 sort-order
+        // remain trusted in `store::proof_home_timeline` because vstd
+        // 0.0.0-2026-04-20-1748 ships no `vstd::vec` sort spec and no
+        // verified mergesort), so the service-layer wrapper carries the same
+        // framing-only contract one composition layer up.
+        //
+        // What R4 verifies (the `home_timeline_ensures` lemma below):
+        //
+        //   - Framing on both ghost-view axes via the `&Service`-not-`&mut`
+        //     signature: the type system pins `service_users_keys` and
+        //     `service_follow_edges` unchanged across the read. No ensures
+        //     clauses are needed — framing is structural.
+        //
+        // What stays trusted in R4 (explicit non-goals):
+        //
+        //   - F1 (visibility): every returned tweet's author is in
+        //     `{user} ∪ follow_set(user)` — propagated as a trust property
+        //     of `store::proof_home_timeline`, not refined into a service-
+        //     layer ensures clause here.
+        //   - F2 (sort order): the returned `Vec<Tweet>` is sorted by
+        //     `(created_at desc, id desc)` — same propagation; needs the
+        //     missing `vstd::vec` sort spec to chain through.
+        //   - The author_tweet_count axis on `&Service` (would let the
+        //     wrapper express that the returned `Vec<Tweet>`'s length is
+        //     bounded by the per-author counts) — out of scope; deferred
+        //     until `Service::post_tweet` lands the F6 axis at the service
+        //     layer.
+        // -----------------------------------------------------------------
+
+        // Trusted shim around `Service::home_timeline`'s store-side
+        // composition step (`s.st.home_timeline(user.as_str(), limit)`).
+        // Body calls the real production method on the concrete `MemStore`
+        // field; framing on both ghost-view axes is structural via the
+        // `&Service` signature (no `&mut`). No ensures clauses on the
+        // returned `Vec<Tweet>` — F1 and F2 stay trusted at the
+        // `store::proof_home_timeline` layer (vstd 0.0.0-2026-04-20-1748
+        // ships no sort spec to chain through).
+        #[verifier::external_body]
+        pub fn proof_service_home_timeline(s: &Service, user: &String, limit: usize) -> (out: Vec<Tweet>)
+        {
+            s.st.home_timeline(user.as_str(), limit)
+        }
+
+        // R4 discharge — verified read-only wrapper for
+        // `Service::home_timeline`. Pure delegation to
+        // `proof_service_home_timeline`. Framing on both ghost-view axes
+        // (`service_users_keys`, `service_follow_edges`) is structural via
+        // the `&Service` signature. F1 and F2 remain trusted at the
+        // `store::proof_home_timeline` layer — see module commentary above.
+        pub fn home_timeline_ensures(s: &Service, user: &String, limit: usize) -> (result: Vec<Tweet>)
+        {
+            proof_service_home_timeline(s, user, limit)
+        }
+
+        // `Service::tick` composition (R1 status; unchanged by R2/R3/R4).
         // Verified `tick_ensures(s: &mut Service)` lemma is **not** shipped
         // here — `Service.clk: Arc<dyn Clock>` has no Verus model in
         // vstd 0.0.0-2026-04-20-1748, and `clock::verus_proof` is a private
@@ -612,9 +692,8 @@ mod verus_proof {
         // `crates/clock` (Phase 1b). When either blocker resolves the
         // lemma can land as a follow-up sub-PR.
         //
-        // `post_tweet`, `home_timeline` discharge composes additional axes
-        // (clock for F7, author_tweet_count for F6) and is scheduled for
-        // sub-PRs after R3.
+        // `post_tweet` discharge composes additional axes (clock for F7,
+        // author_tweet_count for F6) and is scheduled for a later sub-PR.
     }
 }
 
