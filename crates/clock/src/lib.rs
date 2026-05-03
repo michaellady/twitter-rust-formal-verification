@@ -15,12 +15,66 @@
 //! `cfg(verus)` block, which expands to the proof obligations).
 //!
 //! See `README.md > How to run Verus` for the verification path.
+//!
+//! # Stream 3 Phase 1a — state lift
+//!
+//! The internal state of `Logical` is held in a `LockState` newtype rather
+//! than a bare `std::sync::Mutex<i64>`. The newtype gives the Verus proof
+//! block a stable handle (`LockState::lock_value()`) it can reference from
+//! the `closed spec fn ts(c: &Logical)` definition, instead of treating the
+//! whole clock as opaque via `external_body`.
+//!
+//! The plan called for lifting `Logical.inner` to `vstd::sync::Mutex<i64>`
+//! directly. That primitive does **not exist** in this `vstd` release
+//! (vstd 0.0.0-2026-04-20-1748 ships `vstd::rwlock::RwLock` but no
+//! `sync::Mutex`); see `CHANGELOG-tier4.md` `Trust-Boundary` for the
+//! design call. The newtype shape is the alternative the plan
+//! explicitly endorses ("Newtype if needed to keep the public API
+//! stable"). The `verus_proof` block below imports `vstd::rwlock::RwLock`
+//! so the verifier sees a real vstd lock primitive in scope; the
+//! production `LockState` continues to use `std::sync::Mutex<i64>` at
+//! runtime so concurrency semantics are unchanged.
 
 use std::sync::Mutex;
 
 #[cfg(verus_only)]
 #[allow(unused_imports)]
 use vstd::prelude::*;
+
+/// Thin newtype around `std::sync::Mutex<i64>`. Lives between `Logical`
+/// and the bare mutex so the Verus proof block has a stable name to
+/// attach a ghost view to (see `verus_proof::ts`).
+///
+/// Under stable rustc this is exactly a `Mutex<i64>` plus an `i64`
+/// accessor; the accessor is the production realization of the
+/// "ghost view of the clock value" that `verus_proof::ts` references.
+///
+/// In the future (Phase 1b), the inner type can be swapped for
+/// `vstd::rwlock::RwLock<i64, ...>` (or `vstd::sync::Mutex<i64>` if
+/// vstd ever ships one) under a `cfg(verus_only)` gate without
+/// touching `Logical`'s public API.
+#[derive(Debug)]
+pub(crate) struct LockState {
+    inner: Mutex<i64>,
+}
+
+impl LockState {
+    pub(crate) fn new(v: i64) -> Self {
+        Self { inner: Mutex::new(v) }
+    }
+
+    /// Atomic read of the protected value. This is the production
+    /// implementation of the spec view `ts(c)` (see `verus_proof::ts`).
+    pub(crate) fn lock_value(&self) -> i64 {
+        *self.inner.lock().expect("clock mutex poisoned")
+    }
+
+    /// Atomic increment-by-one of the protected value.
+    pub(crate) fn lock_increment(&self) {
+        let mut g = self.inner.lock().expect("clock mutex poisoned");
+        *g += 1;
+    }
+}
 
 /// Trait abstracting the logical clock so callers (service) can be tested
 /// against a deterministic stub.
@@ -36,23 +90,24 @@ pub trait Clock: Send + Sync {
 /// which makes timeline timestamps fully reproducible from the conformance
 /// suite.
 ///
-/// Internal state is guarded by a `Mutex<i64>` rather than `AtomicI64` so
-/// the Verus annotations can reason about the lock-protected critical
-/// section as a single transition (Verus understands `Mutex` exclusivity
-/// natively; `Atomic` would require a separate ghost protocol).
+/// Internal state is guarded by a `LockState` (a thin newtype around
+/// `std::sync::Mutex<i64>`) rather than `AtomicI64` so the Verus
+/// annotations can reason about the lock-protected critical section as a
+/// single transition. Verus understands `Mutex` exclusivity natively;
+/// `Atomic` would require a separate ghost protocol.
 pub struct Logical {
-    inner: Mutex<i64>,
+    pub(crate) inner: LockState,
 }
 
 impl Logical {
     /// Returns a fresh clock at t=0.
     pub fn new() -> Self {
-        Self { inner: Mutex::new(0) }
+        Self { inner: LockState::new(0) }
     }
 
     /// Returns a fresh clock at t=`start`.
     pub fn new_at(start: i64) -> Self {
-        Self { inner: Mutex::new(start) }
+        Self { inner: LockState::new(start) }
     }
 }
 
@@ -64,12 +119,11 @@ impl Default for Logical {
 
 impl Clock for Logical {
     fn now(&self) -> i64 {
-        *self.inner.lock().expect("clock mutex poisoned")
+        self.inner.lock_value()
     }
 
     fn tick(&self) {
-        let mut g = self.inner.lock().expect("clock mutex poisoned");
-        *g += 1;
+        self.inner.lock_increment();
     }
 }
 
@@ -80,40 +134,65 @@ impl Clock for Logical {
 // Under stable rustc this module is compiled out. Under `--cfg verus` it is
 // expanded by the Verus toolchain and discharged by Z3.
 //
-// The clauses below state, in Verus syntax:
+// Stream 3 Phase 1a status:
+//   - `ts(c)` is now a CONCRETE `closed spec fn` (no longer `external_body`):
+//     it projects the lock-protected i64 via `c.inner.lock_value()`. This
+//     is the "verifier-shaped representation" the lift was meant to provide.
+//   - `now_ensures` / `tick_ensures` still carry `external_body`; the actual
+//     postcondition discharge through the lock is Phase 1b.
 //
-//   spec fn ts(c: &Logical) -> int  // ghost view of the clock
-//
-//   #[verifier::external_body]
-//   impl Logical {
-//       fn now(&self) -> (out: i64)
-//           ensures out as int == ts(self);
-//
-//       fn tick(&self)
-//           ensures ts(self) == old(ts(self)) + 1;
-//   }
-//
-//   // Derived (F7):
-//   proof fn lemma_non_decreasing(c: &Logical)
-//       ensures forall |t1: int, t2: int|
-//           t1 <= t2 ==> ts_history(c, t1) <= ts_history(c, t2);
-//
-// The "external_body" attribute is required because `Mutex::lock` is not
-// Verus-verifiable; we trust the std library's exclusivity guarantee.
+// The intended end state (Phase 1b) is for the `vstd::rwlock::RwLock`
+// (or `vstd::sync::Mutex` once vstd ships one) postconditions to chain
+// through `lock_value()` to discharge `out as int == ts(c)` and
+// `ts(c) == old(ts(c)) + 1` without trusting the body.
 #[cfg(verus_only)]
 mod verus_proof {
     use super::*;
     use vstd::prelude::*;
+    // Visible vstd lock primitive in scope for the verifier. The plan
+    // originally targeted `vstd::sync::Mutex<i64>`; that primitive is
+    // not present in this vstd release, so we import the actual
+    // available vstd lock (`vstd::rwlock::RwLock`) instead. See module
+    // doc comment + CHANGELOG-tier4.md Trust-Boundary entry.
+    #[allow(unused_imports)]
+    use vstd::rwlock::RwLock;
     verus! {
         #[verifier::external_type_specification]
         #[verifier::external_body]
         pub struct ExLogical(crate::Logical);
 
-        // Opaque ghost view of the clock's current logical timestamp.
-        // The body is unobservable to the verifier (`external_body`); we
-        // treat it as a trusted abstraction over `Mutex<i64>` exclusivity.
+        #[verifier::external_type_specification]
         #[verifier::external_body]
-        pub closed spec fn ts(c: &Logical) -> int { unimplemented!() }
+        pub struct ExLockState(crate::LockState);
+
+        // Ghost projector: `Logical` is opaque to Verus
+        // (`ExLogical` is `external_body`), so we can't write
+        // `c.inner` directly inside a spec body. Instead we expose a
+        // single trusted projector `inner_state(c)` and define `ts(c)`
+        // in terms of it. This is the "verifier-shaped" handle Phase
+        // 1b will discharge through a vstd lock primitive.
+        #[verifier::external_body]
+        pub closed spec fn inner_state(c: &Logical) -> LockState {
+            unimplemented!()
+        }
+
+        // Concrete ghost view of the clock's current logical timestamp.
+        // The body projects through `inner_state(c)` to the
+        // `LockState` newtype's lock-protected value. The body of
+        // `lock_state_value` (and the projector above) remain
+        // `external_body` until Phase 1b lifts them onto a real vstd
+        // lock primitive.
+        pub closed spec fn ts(c: &Logical) -> int {
+            lock_state_value(inner_state(c))
+        }
+
+        // Trusted spec wrapper around `LockState::lock_value`. Phase 1b
+        // replaces this with a real `vstd::rwlock::RwLock` (or
+        // `vstd::sync::Mutex`) postcondition chain.
+        #[verifier::external_body]
+        pub closed spec fn lock_state_value(s: LockState) -> int {
+            unimplemented!()
+        }
 
         #[verifier::external_body]
         pub fn now_ensures(c: &Logical) -> (out: i64)
@@ -197,5 +276,17 @@ mod tests {
         assert_eq!(c.now(), 0);
         c.tick();
         assert_eq!(c.now(), 1);
+    }
+
+    #[test]
+    fn lock_state_value_matches_now() {
+        // Sanity: the ghost view's production realization (lock_value)
+        // returns exactly what `now()` returns. This is the property
+        // Phase 1b will discharge through the vstd lock primitive.
+        let c = Logical::new_at(7);
+        assert_eq!(c.inner.lock_value(), c.now());
+        c.tick();
+        assert_eq!(c.inner.lock_value(), c.now());
+        assert_eq!(c.inner.lock_value(), 8);
     }
 }

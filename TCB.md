@@ -10,10 +10,12 @@ The Tier-3 baseline below was inventoried during the Tier-3 verifier-strictness 
 
 | File | Function | Why trusted | Validated by |
 |---|---|---|---|
-| `crates/clock/src/lib.rs` | `now_ensures` | wraps `Logical::now` which uses `std::sync::Mutex` (not lifted to `vstd::sync::Mutex` yet) | unit tests + TLC F7 invariant |
+| `crates/clock/src/lib.rs` | `now_ensures` | wraps `Logical::now` which uses `std::sync::Mutex` (not yet lifted onto a vstd lock primitive — Stream 3 Phase 1b) | unit tests + TLC F7 invariant |
 | `crates/clock/src/lib.rs` | `tick_ensures` | same | unit tests + TLC F7 invariant |
-| `crates/clock/src/lib.rs` | `ts(c)` (closed spec, opaque) | spec function whose body would reference vstd Mutex methods that don't exist on `std::sync::Mutex` | derived from external_body of now/tick |
+| `crates/clock/src/lib.rs` | `inner_state(c)` (closed spec, opaque) | Stream 3 Phase 1a: spec projector from opaque `Logical` to its `LockState` newtype, so `ts(c)` body can be written non-opaquely. Replaces the previous opaque `ts(c)` body. Discharged in Phase 1b when the projector becomes structural over a vstd lock primitive. | derived |
+| `crates/clock/src/lib.rs` | `lock_state_value(s)` (closed spec, opaque) | Stream 3 Phase 1a: spec wrapper around `LockState::lock_value`. Body remains trusted until Phase 1b chains it through `vstd::rwlock::RwLock` postconditions. | unit tests asserting `lock_value() == now()` |
 | `crates/clock/src/lib.rs` | `ExLogical` external_type_specification | `Logical` has private `inner` field; structural opaqueness | tests |
+| `crates/clock/src/lib.rs` | `ExLockState` external_type_specification | Stream 3 Phase 1a: `LockState` newtype is opaque to Verus until Phase 1b lifts it to a vstd lock primitive | tests |
 | `crates/ids/src/lib.rs` | `next_id_ensures` | wraps `Generator::next` (Mutex<i64>) | unit tests + TLC F8 invariant |
 | `crates/ids/src/lib.rs` | `count(g)` (closed spec, opaque) | same as `ts` | derived |
 | `crates/ids/src/lib.rs` | `ExGenerator` external_type_specification | `Generator` has private `inner` field | tests |
