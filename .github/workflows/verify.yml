@@ -8,6 +8,11 @@ on:
     - cron: "0 7 * * *"
 
 env:
+  # Opt JavaScript actions (actions/checkout, actions/cache,
+  # actions/setup-java, etc.) onto the Node.js 24 runtime. Node 20 is
+  # being removed from runners in September 2026; this var forces the
+  # newer runtime now without bumping each action's pinned major.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   # Pinned Verus stable tag — bump in lockstep with the prebuilt URL.
   VERUS_VERSION: release/0.2026.04.24.f8e1704
   TLA_VERSION: 1.8.0

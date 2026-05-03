@@ -11,6 +11,11 @@ permissions:
   actions: write
   contents: read
 
+env:
+  # Force Node.js 24 runtime for all JavaScript actions in this workflow.
+  # Node 20 is being removed from runners in September 2026.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   prune-pr-caches:
     name: prune branch-scoped caches on PR close
