@@ -77,37 +77,9 @@
 //! already discharges it (Stream 3 Phase 3); `put_follow` takes a
 //! `Follow` so it is past that gate by construction.
 //!
-//! Sub-PR 4 adds the `put_tweet` discharge: a third ghost-view axis
-//! `closed spec fn author_tweet_count(s: &MemStore, author: Seq<char>) -> nat`
-//! models the per-author tweet count, plus one new `external_body` exec
-//! shim `proof_append_tweet` standing in for the lock-acquire +
-//! `entry().or_default().push()` step. The verified function
-//! `put_tweet_ensures(s: &mut MemStore, t: Tweet) -> Result<(), StoreError>`
-//! chains the existing `proof_users_contains` (for the F6 author-existence
-//! check) with the new append shim and Verus discharges the F6 contract
-//! structurally:
-//!
-//! ```text
-//! ensures
-//!     !users_keys(old(s)).contains(t.author@) ==> result is Err,
-//!     users_keys(old(s)).contains(t.author@)  ==> result is Ok,
-//!     result is Ok ==> author_tweet_count(s, t.author@)
-//!                       == author_tweet_count(old(s), t.author@) + 1,
-//!     result is Err ==> author_tweet_count(s, t.author@)
-//!                       == author_tweet_count(old(s), t.author@),
-//!     users_keys(s) == users_keys(old(s)),
-//!     follow_edges(s) == follow_edges(old(s)),
-//! ```
-//!
-//! "No orphan tweets" (F6) is encoded as a permanent invariant carried by
-//! the append shim's ensures: any author with `author_tweet_count > 0`
-//! is guaranteed to be in `users_keys(s)`. Production logic enforces
-//! this via the upstream existence check; the shim records it as the
-//! abstract post-state Verus needs.
-//!
-//! The other two store methods (`follow_set`, `home_timeline`) remain
-//! in the trusted skeleton and are scheduled for the follow-up sub-PRs
-//! (S3P4-5..6).
+//! The other three store methods (`put_tweet`, `follow_set`, `home_timeline`)
+//! remain in the trusted skeleton and are scheduled for the follow-up
+//! sub-PRs (S3P4-4..6).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
