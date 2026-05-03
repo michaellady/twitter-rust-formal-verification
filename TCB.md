@@ -33,6 +33,7 @@ The Tier-3 baseline below was inventoried during the Tier-3 verifier-strictness 
 | File | Item | Why trusted | Validated by |
 |---|---|---|---|
 | `crates/server/src/main.rs` | tokio + axum bootstrap | wires verified core to `net::TcpListener`; not in spec | smoke tests; live demo |
+| `crates/server/src/main.rs` | `seed_demo` (Phase 1b) | invokes Service methods at startup with hard-coded literals when `SEED_DEMO=true`; pre-populates demo state for fresh visitors | smoke tested locally; integration via deploy → curl /timeline?user=alice expecting non-empty |
 | `crates/server/src/handlers.rs` | all HTTP handlers | JSON serde + error mapping; not in spec | conformance tests; stream 2 diff-test (when live) |
 | `crates/server/src/handlers.rs` | `healthz`, `version` | Tier-4 Phase 1 endpoints; `/version` reads `/etc/version.json` baked into image at build time | post-deploy digest verification in deploy.yml |
 | `.github/workflows/verify.yml` | CI verification gate | enforces TLC + `cargo verus verify --workspace` strict on every push | self-check on every PR |

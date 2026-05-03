@@ -18,6 +18,7 @@ primary_region = "iad"  # Ashburn — change if your latency story is different
   PORT = "8080"
   RUST_LOG = "info"
   STREAM_2_ENABLED = "false"  # flip to true after stream 2 phase 0 lands
+  SEED_DEMO = "true"          # Phase 1b: pre-populate alice/bob/carol on startup
 
 [http_service]
   internal_port = 8080
