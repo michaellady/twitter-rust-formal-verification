@@ -49,10 +49,10 @@
 //!
 //! ```text
 //! ensures
-//!     old(users_keys(s)).contains(u.handle@) ==> result is Err,
-//!     !old(users_keys(s)).contains(u.handle@) ==> result is Ok,
-//!     result is Ok ==> users_keys(s) == old(users_keys(s)).insert(u.handle@),
-//!     result is Err ==> users_keys(s) == old(users_keys(s)),
+//!     users_keys(old(s)).contains(u.handle@) ==> result is Err,
+//!     !users_keys(old(s)).contains(u.handle@) ==> result is Ok,
+//!     result is Ok ==> users_keys(s) == users_keys(old(s)).insert(u.handle@),
+//!     result is Err ==> users_keys(s) == users_keys(old(s)),
 //! ```
 //!
 //! The other six store methods (`has_user`, `put_follow`, `delete_follow`,
@@ -274,9 +274,9 @@ impl Default for MemStore {
 // and why std collections are part of the TCB (vstd::hash_map wraps them).
 //
 //   put_user:
-//     ensures  old(users_keys(s)).contains(u.handle@) ==> result is Err
-//              !old(users_keys(s)).contains(u.handle@) ==> result is Ok
-//              result is Ok ==> users_keys(s) == old(users_keys(s)).insert(u.handle@)
+//     ensures  users_keys(old(s)).contains(u.handle@) ==> result is Err
+//              !users_keys(old(s)).contains(u.handle@) ==> result is Ok
+//              result is Ok ==> users_keys(s) == users_keys(old(s)).insert(u.handle@)
 //     ^^^ DISCHARGED in Stream 3 Phase 4 sub-PR 1 (this PR).
 //
 //   put_follow:
@@ -349,7 +349,7 @@ mod verus_proof {
         // is observationally a `&mut` step.
         #[verifier::external_body]
         pub fn proof_users_insert(s: &mut MemStore, u: User)
-            ensures users_keys(s) == old(users_keys(s)).insert(u.handle@)
+            ensures users_keys(s) == users_keys(old(s)).insert(u.handle@)
         {
             let mut g = s.inner.write().expect("store poisoned");
             g.users.insert(u.handle.clone(), u);
@@ -372,10 +372,10 @@ mod verus_proof {
         // to the key set, observe nothing else."
         pub fn put_user_ensures(s: &mut MemStore, u: User) -> (result: Result<(), StoreError>)
             ensures
-                old(users_keys(s)).contains(u.handle@) ==> result is Err,
-                !old(users_keys(s)).contains(u.handle@) ==> result is Ok,
-                result is Ok ==> users_keys(s) == old(users_keys(s)).insert(u.handle@),
-                result is Err ==> users_keys(s) == old(users_keys(s)),
+                users_keys(old(s)).contains(u.handle@) ==> result is Err,
+                !users_keys(old(s)).contains(u.handle@) ==> result is Ok,
+                result is Ok ==> users_keys(s) == users_keys(old(s)).insert(u.handle@),
+                result is Err ==> users_keys(s) == users_keys(old(s)),
         {
             if proof_users_contains(s, &u.handle) {
                 return Err(StoreError::DuplicateUser);
