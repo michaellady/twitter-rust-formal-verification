@@ -74,3 +74,5 @@ Every Tier-4 PR MUST append at least one line under the appropriate section. The
 ---
 
 _For Tier 1–3 history (the verified core), see git log._
+
+- ci: disable nightly schedules (PR #30) — removed the 07:00 UTC cron from verify.yml and the 06:00 UTC cron from e2e.yml to stop recurring Actions cost. push/PR/post-deploy triggers unchanged; runs still launchable from the Actions tab.
