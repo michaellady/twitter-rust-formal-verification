@@ -3,7 +3,8 @@
 # Runs on:
 #   - every PR (against a locally-booted server in the runner)
 #   - every push to main (after deploy completes — workflow_run trigger)
-#   - nightly at 06:00 UTC (against production)
+# The nightly 06:00 UTC run against production was removed to stop
+# recurring CI cost; run it manually from the Actions tab if needed.
 #
 # Per K4: every handle is namespaced with PLAYWRIGHT_RUN_ID
 # (= github.run_id) so consecutive runs against shared production state
@@ -16,8 +17,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  schedule:
-    - cron: "0 6 * * *"
   workflow_run:
     workflows: [deploy]
     types: [completed]
